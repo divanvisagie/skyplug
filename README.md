@@ -14,8 +14,21 @@ engine always loads, regardless of `Plugins.txt`), cross-references
 skyplug list              # show every plugin and its state
 skyplug enable <plugin>   # add/set the `*` prefix in Plugins.txt
 skyplug disable <plugin>  # remove the `*` prefix in Plugins.txt
+skyplug edit               # interactive TUI to enable/disable plugins
 skyplug paths             # print the resolved Data/Plugins.txt/Skyrim.ccc paths
 ```
+
+### `edit` (TUI)
+
+- `↑`/`↓` or `j`/`k` — move selection
+- `space`/`enter` — toggle the selected plugin
+- `s` — save changes and quit
+- `q`/`esc` — quit; if there are unsaved changes, prompts once more before discarding
+
+Changes are only written to `Plugins.txt` on `s`; toggles made while browsing
+are kept in memory until then, shown with a trailing `*`. Master/light-master
+and missing plugins can't be toggled (toggling them would have no effect, or
+nothing to toggle) — selecting them shows why in the status bar instead.
 
 `<plugin>` can be the exact filename, a different case, or just the name
 without its extension (e.g. `skyplug enable "paarthurnax dilemma"` matches

@@ -1,5 +1,6 @@
 mod plugins;
 mod steam;
+mod tui;
 
 use std::path::PathBuf;
 
@@ -33,6 +34,8 @@ enum Command {
     Enable { plugin: String },
     /// Disable a plugin (removes the `*` prefix in Plugins.txt).
     Disable { plugin: String },
+    /// Interactive TUI to enable/disable plugins.
+    Edit,
     /// Show the resolved game/Plugins.txt paths and exit.
     Paths,
 }
@@ -149,6 +152,21 @@ fn cmd_disable(resolved: &Resolved, plugin: &str) -> Result<()> {
     Ok(())
 }
 
+fn cmd_edit(resolved: &Resolved) -> Result<()> {
+    let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
+    let plugins_txt = plugins::parse_plugins_txt(&resolved.plugins_txt)?;
+    let ccc = plugins::parse_ccc(&resolved.ccc_path)?;
+    let statuses = plugins::build_status(&data_plugins, &plugins_txt, &ccc);
+
+    let saved = tui::run(&resolved.plugins_txt, statuses)?;
+    if saved > 0 {
+        println!("saved {saved} change(s) to {}", resolved.plugins_txt.display());
+    } else {
+        println!("no changes saved");
+    }
+    Ok(())
+}
+
 fn cmd_paths(cli: &Cli, resolved: &Resolved) -> Result<()> {
     println!("appid:       {}", cli.appid);
     println!("data dir:    {}", resolved.data_dir.display());
@@ -165,6 +183,7 @@ fn main() -> Result<()> {
         Command::List => cmd_list(&resolved),
         Command::Enable { plugin } => cmd_enable(&resolved, plugin),
         Command::Disable { plugin } => cmd_disable(&resolved, plugin),
+        Command::Edit => cmd_edit(&resolved),
         Command::Paths => cmd_paths(&cli, &resolved),
     }
 }

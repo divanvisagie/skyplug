@@ -207,10 +207,7 @@ pub enum ChangeResult {
     NoOpDisableUntracked,
 }
 
-/// Enable or disable `plugin_name` (exact on-disk case) in Plugins.txt,
-/// rewriting the file in place. A `.bak` backup of the previous contents is
-/// written alongside it first.
-pub fn set_plugin_enabled(path: &Path, plugin_name: &str, enable: bool) -> Result<ChangeResult> {
+fn read_lines_or_default_header(path: &Path) -> Result<(String, Vec<String>)> {
     let original = if path.exists() {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
     } else {
@@ -218,12 +215,38 @@ pub fn set_plugin_enabled(path: &Path, plugin_name: &str, enable: bool) -> Resul
             "# This file is used by Skyrim to keep track of your downloaded content.\n# Please do not modify this file.\n",
         )
     };
+    let lines = original.lines().map(|l| l.to_string()).collect();
+    Ok((original, lines))
+}
 
-    let mut lines: Vec<String> = original.lines().map(|l| l.to_string()).collect();
-    let match_idx = lines.iter().position(|line| {
+fn find_plugin_line(lines: &[String], plugin_name: &str) -> Option<usize> {
+    lines.iter().position(|line| {
         let trimmed = line.trim_start_matches('*');
         !trimmed.trim().is_empty() && !line.trim_start().starts_with('#') && eq_ci(trimmed, plugin_name)
-    });
+    })
+}
+
+fn write_with_backup(path: &Path, original: &str, lines: &[String]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    if path.exists() {
+        std::fs::write(path.with_extension("txt.bak"), original)
+            .with_context(|| format!("writing backup for {}", path.display()))?;
+    }
+
+    let mut new_contents = lines.join("\n");
+    new_contents.push('\n');
+    std::fs::write(path, new_contents).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Enable or disable `plugin_name` (exact on-disk case) in Plugins.txt,
+/// rewriting the file in place. A `.bak` backup of the previous contents is
+/// written alongside it first.
+pub fn set_plugin_enabled(path: &Path, plugin_name: &str, enable: bool) -> Result<ChangeResult> {
+    let (original, mut lines) = read_lines_or_default_header(path)?;
+    let match_idx = find_plugin_line(&lines, plugin_name);
 
     let result = match (match_idx, enable) {
         (Some(idx), true) => {
@@ -249,19 +272,37 @@ pub fn set_plugin_enabled(path: &Path, plugin_name: &str, enable: bool) -> Resul
         (None, false) => return Ok(ChangeResult::NoOpDisableUntracked),
     };
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    if path.exists() {
-        std::fs::write(path.with_extension("txt.bak"), &original)
-            .with_context(|| format!("writing backup for {}", path.display()))?;
-    }
-
-    let mut new_contents = lines.join("\n");
-    new_contents.push('\n');
-    std::fs::write(path, new_contents)
-        .with_context(|| format!("writing {}", path.display()))?;
-
+    write_with_backup(path, &original, &lines)?;
     Ok(result)
+}
+
+/// Apply a batch of (exact plugin name, desired active state) changes to
+/// Plugins.txt in a single read/write, with a single `.bak` backup. Returns
+/// the number of lines actually changed (entries already in the desired
+/// state, or disables of untracked plugins, don't count).
+pub fn apply_changes(path: &Path, changes: &[(String, bool)]) -> Result<usize> {
+    let (original, mut lines) = read_lines_or_default_header(path)?;
+    let mut applied = 0usize;
+
+    for (name, want_active) in changes {
+        match find_plugin_line(&lines, name) {
+            Some(idx) => {
+                let currently_active = lines[idx].starts_with('*');
+                if currently_active != *want_active {
+                    lines[idx] = if *want_active { format!("*{name}") } else { name.clone() };
+                    applied += 1;
+                }
+            }
+            None if *want_active => {
+                lines.push(format!("*{name}"));
+                applied += 1;
+            }
+            None => {}
+        }
+    }
+
+    if applied > 0 {
+        write_with_backup(path, &original, &lines)?;
+    }
+    Ok(applied)
 }

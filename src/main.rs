@@ -29,6 +29,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// List every plugin in Data with its enabled/disabled/missing state.
+    ///
+    /// Each line is prefixed with a status marker:
+    ///   [x]  enabled
+    ///   [ ]  disabled
+    ///   [!]  missing from Data (listed in Plugins.txt but the file isn't there)
+    ///   [M]  master/light-master — the engine always loads it regardless of Plugins.txt
+    ///   [CC] Creation Club content — always loaded via Skyrim.ccc regardless of Plugins.txt
+    #[command(verbatim_doc_comment)]
     List,
     /// Enable a plugin (adds/sets the `*` prefix in Plugins.txt).
     Enable { plugin: String },

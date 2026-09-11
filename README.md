@@ -22,6 +22,7 @@ skyplug paths             # print the resolved Data/Plugins.txt/Skyrim.ccc paths
 
 - `↑`/`↓` or `j`/`k` — move selection
 - `space`/`enter` — toggle the selected plugin
+- `/` — filter by substring (live, case-insensitive); `↑`/`↓` still move while typing, `enter` keeps the filter, `esc` cancels back to what it was
 - `s` — save changes and quit
 - `q`/`esc` — quit; if there are unsaved changes, prompts once more before discarding
 

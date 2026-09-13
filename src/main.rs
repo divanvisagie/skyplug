@@ -74,7 +74,7 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
             install.ccc_path(),
         )
     } else {
-        let install = steam::find_game_install()?;
+        let install = steam::find_game_install(&cli.appid)?;
         (
             install.data_dir(),
             install.plugins_txt_path(&cli.appid),

@@ -8,7 +8,6 @@ const PLUGIN_EXTENSIONS: [&str; 3] = ["esp", "esm", "esl"];
 
 // TES4 header record flags (see the Creation Kit wiki's "Data File Format" page).
 const RECORD_FLAG_MASTER: u32 = 0x0000_0001;
-const RECORD_FLAG_LIGHT: u32 = 0x0000_0200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -24,9 +23,15 @@ pub struct PluginStatus {
     pub state: State,
     /// Creation Club content: auto-loaded via Skyrim.ccc regardless of Plugins.txt.
     pub is_cc: bool,
-    /// Master or light-master flagged: the engine force-loads these
-    /// regardless of Plugins.txt, so `*` there is irrelevant to them.
+    /// Master flagged: the engine force-loads these regardless of
+    /// Plugins.txt, so `*` there is irrelevant to them. The light-master
+    /// (ESL) bit does NOT imply this — light-flagged plugins still need
+    /// `*` in Plugins.txt to load, same as an ordinary .esp.
     pub is_forced: bool,
+    /// 1-based position in the approximate engine load order, or `None` if
+    /// the plugin doesn't actually load (disabled or missing). See
+    /// `build_status` for how this is derived.
+    pub load_order: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,10 +40,10 @@ pub struct DataPlugin {
     pub is_forced: bool,
 }
 
-/// Read the TES4 header's record flags and report whether the master or
-/// light-master bit is set. Any read/parse failure is treated as "not
-/// forced" rather than an error, since a handful of unreadable/odd files
-/// shouldn't stop the whole scan.
+/// Read the TES4 header's record flags and report whether the master bit
+/// is set. Any read/parse failure is treated as "not forced" rather than
+/// an error, since a handful of unreadable/odd files shouldn't stop the
+/// whole scan.
 fn read_forced_flag(path: &Path) -> bool {
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
@@ -51,12 +56,12 @@ fn read_forced_flag(path: &Path) -> bool {
         return false;
     }
     let flags = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
-    flags & (RECORD_FLAG_MASTER | RECORD_FLAG_LIGHT) != 0
+    flags & RECORD_FLAG_MASTER != 0
 }
 
 /// List every `.esp`/`.esm`/`.esl` file directly inside `Data`, exact case
 /// as it exists on disk, along with whether its header marks it as a
-/// master/light-master (force-loaded by the engine).
+/// master (force-loaded by the engine).
 pub fn scan_data_plugins(data_dir: &Path) -> Result<Vec<DataPlugin>> {
     let mut plugins = Vec::new();
     let entries = std::fs::read_dir(data_dir)
@@ -155,6 +160,7 @@ pub fn build_status(
             state,
             is_cc,
             is_forced: plugin.is_forced,
+            load_order: None,
         });
     }
 
@@ -167,12 +173,49 @@ pub fn build_status(
                 state: State::Missing,
                 is_cc: false,
                 is_forced: false,
+                load_order: None,
             });
         }
     }
 
+    assign_load_order(&mut statuses, plugins_txt, ccc);
+
     statuses.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     statuses
+}
+
+/// Approximate the engine's load order and stamp each loadable plugin's
+/// `load_order` with its 1-based position in it.
+///
+/// The engine actually loads: Creation Club content (Skyrim.ccc order),
+/// then master/light-master plugins, then regular plugins — with masters
+/// additionally reordered among themselves by their master-file
+/// dependencies. We don't parse each plugin's master list, so within a
+/// group this just uses the order it's listed in Plugins.txt/Skyrim.ccc,
+/// which is right often enough to be useful but isn't a guarantee.
+/// Disabled and missing plugins don't load at all, so they're left `None`.
+fn assign_load_order(statuses: &mut [PluginStatus], plugins_txt: &[PluginsTxtEntry], ccc: &[String]) {
+    let txt_pos = |name: &str| plugins_txt.iter().position(|e| eq_ci(&e.name, name));
+    let ccc_pos = |name: &str| ccc.iter().position(|c| eq_ci(c, name));
+
+    let mut loadable: Vec<usize> = (0..statuses.len())
+        .filter(|&i| statuses[i].is_cc || statuses[i].is_forced || statuses[i].state == State::Enabled)
+        .collect();
+
+    loadable.sort_by_key(|&i| {
+        let s = &statuses[i];
+        if s.is_cc {
+            (0u8, ccc_pos(&s.name).unwrap_or(usize::MAX))
+        } else if s.is_forced {
+            (1u8, txt_pos(&s.name).unwrap_or(usize::MAX))
+        } else {
+            (2u8, txt_pos(&s.name).unwrap_or(usize::MAX))
+        }
+    });
+
+    for (order, &i) in loadable.iter().enumerate() {
+        statuses[i].load_order = Some(order + 1);
+    }
 }
 
 /// Resolve a user-supplied plugin argument (exact name, wrong case, or bare

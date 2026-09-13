@@ -10,13 +10,14 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::plugins::{self, PluginStatus, State};
 
-const HELP_TEXT: &str = "space: toggle  /: filter  o: sort  s: save  q: quit";
+const HELP_TEXT: &str = "space: toggle  gg/G: top/bottom  /: filter  o: sort  s: save  q: quit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortMode {
     Name,
     Type,
     Enabled,
+    LoadOrder,
 }
 
 impl SortMode {
@@ -24,7 +25,8 @@ impl SortMode {
         match self {
             SortMode::Name => SortMode::Type,
             SortMode::Type => SortMode::Enabled,
-            SortMode::Enabled => SortMode::Name,
+            SortMode::Enabled => SortMode::LoadOrder,
+            SortMode::LoadOrder => SortMode::Name,
         }
     }
 
@@ -33,6 +35,7 @@ impl SortMode {
             SortMode::Name => "name",
             SortMode::Type => "type",
             SortMode::Enabled => "enabled",
+            SortMode::LoadOrder => "load order",
         }
     }
 }
@@ -76,6 +79,9 @@ struct App {
     editing_filter: bool,
     filter_before_edit: String,
     sort_mode: SortMode,
+    /// Set after a lone `g` press, so a following `g` completes the vim
+    /// `gg` (jump to top) chord. Cleared on any other key.
+    pending_g: bool,
 }
 
 impl App {
@@ -94,7 +100,8 @@ impl App {
             filter: String::new(),
             editing_filter: false,
             filter_before_edit: String::new(),
-            sort_mode: SortMode::Name,
+            sort_mode: SortMode::LoadOrder,
+            pending_g: false,
         }
     }
 
@@ -121,6 +128,11 @@ impl App {
                 SortMode::Name => std::cmp::Ordering::Equal,
                 SortMode::Type => type_rank(&ra.status.name).cmp(&type_rank(&rb.status.name)),
                 SortMode::Enabled => rb.effective_active().cmp(&ra.effective_active()),
+                SortMode::LoadOrder => ra
+                    .status
+                    .load_order
+                    .unwrap_or(usize::MAX)
+                    .cmp(&rb.status.load_order.unwrap_or(usize::MAX)),
             };
             ordering.then_with(|| ra.status.name.to_lowercase().cmp(&rb.status.name.to_lowercase()))
         });
@@ -162,6 +174,21 @@ impl App {
         let current = self.list_state.selected().unwrap_or(0) as i32;
         let next = (current + delta).rem_euclid(len);
         self.list_state.select(Some(next as usize));
+        self.confirm_discard = false;
+    }
+
+    fn select_first(&mut self) {
+        if !self.filtered_indices().is_empty() {
+            self.list_state.select(Some(0));
+        }
+        self.confirm_discard = false;
+    }
+
+    fn select_last(&mut self) {
+        let filtered_len = self.filtered_indices().len();
+        if filtered_len > 0 {
+            self.list_state.select(Some(filtered_len - 1));
+        }
         self.confirm_discard = false;
     }
 
@@ -258,7 +285,12 @@ impl App {
                     color = Color::Yellow;
                 }
                 let marker = if row.pending.is_some() { "*" } else { " " };
+                let order_label = match row.status.load_order {
+                    Some(n) => format!("{n:>3}"),
+                    None => "  -".to_string(),
+                };
                 ListItem::new(Line::from(vec![
+                    Span::styled(format!("{order_label} "), Style::default().fg(Color::DarkGray)),
                     Span::styled(format!("{symbol} "), Style::default().fg(color)),
                     Span::raw(row.status.name.clone()),
                     Span::styled(marker, Style::default().fg(Color::Yellow)),
@@ -293,12 +325,25 @@ impl App {
             return;
         }
 
+        if !matches!(code, KeyCode::Char('g')) {
+            self.pending_g = false;
+        }
+
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selected(),
             KeyCode::Char('/') => self.start_filter_edit(),
             KeyCode::Char('o') => self.cycle_sort(),
+            KeyCode::Char('G') => self.select_last(),
+            KeyCode::Char('g') => {
+                if self.pending_g {
+                    self.pending_g = false;
+                    self.select_first();
+                } else {
+                    self.pending_g = true;
+                }
+            }
             KeyCode::Char('s') => {
                 self.save_on_exit = true;
                 self.quit = true;

@@ -52,23 +52,6 @@ fn candidate_steam_roots(home: &Path) -> Vec<PathBuf> {
     ]
 }
 
-/// Extract every `"path"  "..."` value from a `libraryfolders.vdf` file.
-/// This is a small line-oriented scan rather than a full VDF parser, which
-/// is all that's needed for this key.
-fn parse_library_paths(vdf: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for line in vdf.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("\"path\"") {
-            let rest = rest.trim();
-            if let Some(value) = extract_quoted(rest) {
-                paths.push(PathBuf::from(value.replace("\\\\", "/")));
-            }
-        }
-    }
-    paths
-}
-
 fn extract_quoted(s: &str) -> Option<&str> {
     let s = s.trim();
     let s = s.strip_prefix('"')?;
@@ -76,47 +59,132 @@ fn extract_quoted(s: &str) -> Option<&str> {
     Some(&s[..end])
 }
 
-/// All Steam library roots (folders containing a `steamapps` dir) reachable
-/// from any discovered Steam install.
-pub fn library_roots() -> Result<Vec<PathBuf>> {
+/// A Steam library folder, with the set of appids Steam considers installed
+/// under it (per `libraryfolders.vdf`'s `"apps"` block for that library).
+struct Library {
+    path: PathBuf,
+    apps: Vec<String>,
+}
+
+/// Parse a `libraryfolders.vdf` file into each library's path and owned
+/// appids. This is a depth-tracking scan rather than a full VDF parser —
+/// enough for the file's fixed shape:
+///
+/// ```text
+/// "libraryfolders"
+/// {
+///     "0"
+///     {
+///         "path"  "..."
+///         "apps"
+///         {
+///             "<appid>"  "<size>"
+///         }
+///     }
+/// }
+/// ```
+///
+/// Appid ownership matters because a stale/leftover install directory can
+/// exist under a library Steam no longer considers this app installed in
+/// (e.g. after moving the install to a different library without deleting
+/// files Steam didn't track, like loose mod files); relying on directory
+/// existence alone can then pick the wrong install.
+fn parse_libraries(vdf: &str) -> Vec<Library> {
+    let mut libraries = Vec::new();
+    let mut depth: i32 = 0;
+    let mut library_depth: Option<i32> = None;
+    let mut apps_depth: Option<i32> = None;
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_apps: Vec<String> = Vec::new();
+    let mut pending_key: Option<String> = None;
+
+    for raw_line in vdf.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line == "{" {
+            depth += 1;
+            if let Some(key) = pending_key.take() {
+                if library_depth.is_none() && !key.is_empty() && key.chars().all(|c| c.is_ascii_digit()) {
+                    library_depth = Some(depth);
+                    current_path = None;
+                    current_apps = Vec::new();
+                } else if library_depth == Some(depth - 1) && key == "apps" {
+                    apps_depth = Some(depth);
+                }
+            }
+            continue;
+        }
+
+        if line == "}" {
+            if apps_depth == Some(depth) {
+                apps_depth = None;
+            } else if library_depth == Some(depth) {
+                if let Some(path) = current_path.take() {
+                    libraries.push(Library { path, apps: std::mem::take(&mut current_apps) });
+                }
+                library_depth = None;
+            }
+            depth -= 1;
+            continue;
+        }
+
+        let Some(rest) = line.strip_prefix('"') else { continue };
+        let Some(key_end) = rest.find('"') else { continue };
+        let key = &rest[..key_end];
+        let after = rest[key_end + 1..].trim();
+
+        if after.is_empty() {
+            // Bare `"key"` line — its block opens on the next line.
+            pending_key = Some(key.to_string());
+            continue;
+        }
+
+        if apps_depth == Some(depth) {
+            current_apps.push(key.to_string());
+        } else if library_depth == Some(depth) && key == "path" {
+            if let Some(value) = extract_quoted(after) {
+                current_path = Some(PathBuf::from(value.replace("\\\\", "/")));
+            }
+        }
+    }
+
+    libraries
+}
+
+/// Locate the Skyrim Special Edition install by finding the Steam library
+/// that actually owns `appid`, per `libraryfolders.vdf` — not just any
+/// library with a `steamapps/common/Skyrim Special Edition` folder lying
+/// around, since a stale one from a prior install location can persist.
+pub fn find_game_install(appid: &str) -> Result<GameInstall> {
     let home = home_dir()?;
-    let mut roots = Vec::new();
+    let mut any_steam_root = false;
 
     for steam_root in candidate_steam_roots(&home) {
         if !steam_root.is_dir() {
             continue;
         }
-        roots.push(steam_root.clone());
+        any_steam_root = true;
 
         let vdf_path = steam_root.join("steamapps/libraryfolders.vdf");
-        if let Ok(contents) = std::fs::read_to_string(&vdf_path) {
-            roots.extend(parse_library_paths(&contents));
+        let Ok(contents) = std::fs::read_to_string(&vdf_path) else { continue };
+
+        for library in parse_libraries(&contents) {
+            if !library.apps.iter().any(|a| a == appid) {
+                continue;
+            }
+            let game_dir = library.path.join("steamapps/common").join(DEFAULT_GAME_FOLDER);
+            return Ok(GameInstall { game_dir, library_root: library.path });
         }
     }
 
-    roots.sort();
-    roots.dedup();
-
-    if roots.is_empty() {
+    if !any_steam_root {
         bail!("could not find a Steam installation under {}", home.display());
     }
-
-    Ok(roots)
-}
-
-/// Locate the Skyrim Special Edition install by scanning every known Steam
-/// library for `steamapps/common/Skyrim Special Edition`.
-pub fn find_game_install() -> Result<GameInstall> {
-    for library_root in library_roots()? {
-        let game_dir = library_root
-            .join("steamapps/common")
-            .join(DEFAULT_GAME_FOLDER);
-        if game_dir.join("SkyrimSE.exe").exists() || game_dir.join("Data").is_dir() {
-            return Ok(GameInstall { game_dir, library_root });
-        }
-    }
     bail!(
-        "could not find a \"{}\" install under any Steam library",
+        "no Steam library reports owning appid {appid} (looked for a \"{}\" install)",
         DEFAULT_GAME_FOLDER
     )
 }

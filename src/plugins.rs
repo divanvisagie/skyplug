@@ -9,6 +9,33 @@ const PLUGIN_EXTENSIONS: [&str; 3] = ["esp", "esm", "esl"];
 // TES4 header record flags (see the Creation Kit wiki's "Data File Format" page).
 const RECORD_FLAG_MASTER: u32 = 0x0000_0001;
 
+/// The base game's own masters — always present with a legitimate install,
+/// so worth calling out separately from a "mod".
+const NATIVE_MASTERS: [&str; 5] = ["Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginOrigin {
+    /// One of the base game's own master files.
+    Native,
+    /// Bethesda Creation Club content — by convention named `cc*`.
+    CreationClub,
+    /// A third-party mod.
+    Mod,
+}
+
+/// Classify a plugin filename the same way `Skyrim.ccc`/official tooling
+/// effectively does: the 5 native masters, `cc`-prefixed Creation Club
+/// content, everything else a mod. Doesn't check disk presence.
+pub fn classify_origin(name: &str) -> PluginOrigin {
+    if NATIVE_MASTERS.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+        PluginOrigin::Native
+    } else if name.get(0..2).is_some_and(|p| p.eq_ignore_ascii_case("cc")) {
+        PluginOrigin::CreationClub
+    } else {
+        PluginOrigin::Mod
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Enabled,

@@ -1,4 +1,5 @@
 mod plugins;
+mod saves;
 mod steam;
 mod tui;
 
@@ -46,16 +47,25 @@ enum Command {
     Edit,
     /// Show the resolved game/Plugins.txt paths and exit.
     Paths,
+    /// List every character across all saves, with their latest save.
+    Characters,
+    /// List every save belonging to a character (exact or substring match
+    /// on the character/player name).
+    Saves { character: String },
+    /// List the plugins that were active in a specific save (exact
+    /// filename, filename without `.ess`, or a substring).
+    SavePlugins { save: String },
 }
 
 struct Resolved {
     data_dir: PathBuf,
     plugins_txt: PathBuf,
     ccc_path: PathBuf,
+    saves_dir: PathBuf,
 }
 
 fn resolve(cli: &Cli) -> Result<Resolved> {
-    let (data_dir, plugins_txt, ccc_path) = if let Some(game_dir) = &cli.game_dir {
+    let install = if let Some(game_dir) = &cli.game_dir {
         // Manual override: derive compatdata from the library two levels up
         // (<library>/steamapps/common/<game>), same layout Steam uses.
         let library_root = game_dir
@@ -64,25 +74,20 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
             .and_then(|p| p.parent())
             .context("--game-dir doesn't look like a Steam steamapps/common install")?
             .to_path_buf();
-        let install = steam::GameInstall {
+        steam::GameInstall {
             game_dir: game_dir.clone(),
             library_root,
-        };
-        (
-            install.data_dir(),
-            install.plugins_txt_path(&cli.appid),
-            install.ccc_path(),
-        )
+        }
     } else {
-        let install = steam::find_game_install(&cli.appid)?;
-        (
-            install.data_dir(),
-            install.plugins_txt_path(&cli.appid),
-            install.ccc_path(),
-        )
+        steam::find_game_install(&cli.appid)?
     };
 
-    Ok(Resolved { data_dir, plugins_txt, ccc_path })
+    Ok(Resolved {
+        data_dir: install.data_dir(),
+        plugins_txt: install.plugins_txt_path(&cli.appid),
+        ccc_path: install.ccc_path(),
+        saves_dir: install.saves_dir(&cli.appid),
+    })
 }
 
 fn state_label(status: &plugins::PluginStatus) -> &'static str {
@@ -180,6 +185,89 @@ fn cmd_paths(cli: &Cli, resolved: &Resolved) -> Result<()> {
     println!("data dir:    {}", resolved.data_dir.display());
     println!("plugins.txt: {}", resolved.plugins_txt.display());
     println!("skyrim.ccc:  {}", resolved.ccc_path.display());
+    println!("saves dir:   {}", resolved.saves_dir.display());
+    Ok(())
+}
+
+fn cmd_characters(resolved: &Resolved) -> Result<()> {
+    let entries = saves::list_saves(&resolved.saves_dir)?;
+    if entries.is_empty() {
+        println!("no saves found in {}", resolved.saves_dir.display());
+        return Ok(());
+    }
+
+    // `entries` is newest-first, so the first save seen per character is
+    // their latest; `order` preserves that recency across characters too.
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut latest: std::collections::HashMap<&str, &saves::SaveEntry> = std::collections::HashMap::new();
+    for entry in &entries {
+        let name = entry.header.player_name.as_str();
+        if !counts.contains_key(name) {
+            order.push(name.to_string());
+            latest.insert(name, entry);
+        }
+        *counts.entry(name).or_insert(0) += 1;
+    }
+
+    for name in &order {
+        let count = counts[name.as_str()];
+        let last = latest[name.as_str()];
+        let when = saves::save_timestamp(&last.file_name).unwrap_or_else(|| "unknown time".to_string());
+        let plural = if count == 1 { "save" } else { "saves" };
+        println!(
+            "{name} ({}) — {count} {plural}, latest: level {} at {} on {}, {when}",
+            last.header.player_race_editor_id,
+            last.header.player_level,
+            last.header.player_location,
+            last.header.game_date
+        );
+    }
+    Ok(())
+}
+
+fn cmd_saves(resolved: &Resolved, character: &str) -> Result<()> {
+    let entries = saves::list_saves(&resolved.saves_dir)?;
+    let name = saves::resolve_character(character, &entries)?;
+
+    for entry in entries.iter().filter(|e| e.header.player_name == name) {
+        let when = saves::save_timestamp(&entry.file_name).unwrap_or_else(|| "unknown time".to_string());
+        println!(
+            "#{:<4} level {:<3} {:<30} in-game day {:<10} {}  {}",
+            entry.header.save_number,
+            entry.header.player_level,
+            entry.header.player_location,
+            entry.header.game_date,
+            when,
+            entry.file_name
+        );
+    }
+    Ok(())
+}
+
+fn cmd_save_plugins(resolved: &Resolved, save: &str) -> Result<()> {
+    let entries = saves::list_saves(&resolved.saves_dir)?;
+    let entry = saves::resolve_save(save, &entries)?;
+    let plugin_list = saves::read_plugins_from_file(&entry.path)?;
+
+    let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
+    let installed: std::collections::HashSet<String> =
+        data_plugins.iter().map(|p| p.name.to_lowercase()).collect();
+
+    let width = plugin_list.iter().map(|p| p.len()).max().unwrap_or(0);
+    println!("{} — {} plugin(s):", entry.file_name, plugin_list.len());
+    for plugin in &plugin_list {
+        let tag = if !installed.contains(&plugin.to_lowercase()) {
+            "[!]  missing from Data"
+        } else {
+            match plugins::classify_origin(plugin) {
+                plugins::PluginOrigin::Native => "[M]  native (base game/DLC)",
+                plugins::PluginOrigin::CreationClub => "[CC] creation club",
+                plugins::PluginOrigin::Mod => "[OK] installed",
+            }
+        };
+        println!("  {plugin:<width$}  {tag}");
+    }
     Ok(())
 }
 
@@ -193,5 +281,8 @@ fn main() -> Result<()> {
         Command::Disable { plugin } => cmd_disable(&resolved, plugin),
         Command::Edit => cmd_edit(&resolved),
         Command::Paths => cmd_paths(&cli, &resolved),
+        Command::Characters => cmd_characters(&resolved),
+        Command::Saves { character } => cmd_saves(&resolved, character),
+        Command::SavePlugins { save } => cmd_save_plugins(&resolved, save),
     }
 }

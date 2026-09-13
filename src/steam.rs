@@ -33,6 +33,15 @@ impl GameInstall {
             .join(DEFAULT_GAME_FOLDER)
             .join("Plugins.txt")
     }
+
+    /// Path to the `Saves` folder (`.ess` files) inside the Proton prefix
+    /// for this install.
+    pub fn saves_dir(&self, appid: &str) -> PathBuf {
+        self.compatdata_dir(appid)
+            .join("pfx/drive_c/users/steamuser/Documents/My Games")
+            .join(DEFAULT_GAME_FOLDER)
+            .join("Saves")
+    }
 }
 
 fn home_dir() -> Result<PathBuf> {

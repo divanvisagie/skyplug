@@ -2,7 +2,7 @@
 name = "skyplug"
 version = "0.1.0"
 edition = "2024"
-license = "GPL-2.0-only"
+license = "BSD-3-Clause"
 description = "Scan and toggle Skyrim Special Edition plugins (Plugins.txt) on Linux/Steam"
 
 [dependencies]

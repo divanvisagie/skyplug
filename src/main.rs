@@ -250,23 +250,29 @@ fn cmd_save_plugins(resolved: &Resolved, save: &str) -> Result<()> {
     let entry = saves::resolve_save(save, &entries)?;
     let plugin_list = saves::read_plugins_from_file(&entry.path)?;
 
+    // Same status resolution `list` uses (Data/ + Plugins.txt + Skyrim.ccc),
+    // so a save's plugin shows whether it's actually active right now, not
+    // just present on disk — a disabled mod is not the same as a missing one.
     let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
-    let installed: std::collections::HashSet<String> =
-        data_plugins.iter().map(|p| p.name.to_lowercase()).collect();
+    let plugins_txt = plugins::parse_plugins_txt(&resolved.plugins_txt)?;
+    let ccc = plugins::parse_ccc(&resolved.ccc_path)?;
+    let statuses = plugins::build_status(&data_plugins, &plugins_txt, &ccc);
 
     let width = plugin_list.iter().map(|p| p.len()).max().unwrap_or(0);
     println!("{} — {} plugin(s):", entry.file_name, plugin_list.len());
     for plugin in &plugin_list {
-        let tag = if !installed.contains(&plugin.to_lowercase()) {
-            "[!]  missing from Data"
-        } else {
-            match plugins::classify_origin(plugin) {
-                plugins::PluginOrigin::Native => "[M]  native (base game/DLC)",
-                plugins::PluginOrigin::CreationClub => "[CC] creation club",
-                plugins::PluginOrigin::Mod => "[OK] installed",
-            }
+        let status = statuses.iter().find(|s| s.name.eq_ignore_ascii_case(plugin));
+        let (tag, note) = match status {
+            None => ("[!]", "missing from Data"),
+            Some(s) => match state_label(s) {
+                "[x]" => ("[x]", "installed and active"),
+                "[ ]" => ("[ ]", "installed but disabled in Plugins.txt"),
+                "[!]" => ("[!]", "listed in Plugins.txt but missing from Data"),
+                "[M]" => ("[M]", "native (base game/DLC)"),
+                _ => ("[CC]", "creation club"),
+            },
         };
-        println!("  {plugin:<width$}  {tag}");
+        println!("  {plugin:<width$}  {tag} {note}");
     }
     Ok(())
 }

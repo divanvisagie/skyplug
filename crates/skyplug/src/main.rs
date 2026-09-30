@@ -1,6 +1,3 @@
-mod plugins;
-mod saves;
-mod steam;
 mod tui;
 
 use std::path::PathBuf;
@@ -8,7 +5,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use plugins::{ChangeResult, State};
+use skyplug_core::plugins::{self, ChangeResult, State};
+use skyplug_core::{GameInstall, GamePaths, saves, steam};
 
 /// Scan and toggle Skyrim Special Edition plugins on Linux/Steam.
 #[derive(Parser)]
@@ -57,37 +55,21 @@ enum Command {
     SavePlugins { save: String },
 }
 
-struct Resolved {
-    data_dir: PathBuf,
-    plugins_txt: PathBuf,
-    ccc_path: PathBuf,
-    saves_dir: PathBuf,
+fn resolve(cli: &Cli) -> Result<GamePaths> {
+    let install = match &cli.game_dir {
+        Some(game_dir) => GameInstall::from_game_dir(game_dir).context("--game-dir")?,
+        None => steam::find_game_install(&cli.appid)?,
+    };
+    Ok(GamePaths::new(&install, &cli.appid))
 }
 
-fn resolve(cli: &Cli) -> Result<Resolved> {
-    let install = if let Some(game_dir) = &cli.game_dir {
-        // Manual override: derive compatdata from the library two levels up
-        // (<library>/steamapps/common/<game>), same layout Steam uses.
-        let library_root = game_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .context("--game-dir doesn't look like a Steam steamapps/common install")?
-            .to_path_buf();
-        steam::GameInstall {
-            game_dir: game_dir.clone(),
-            library_root,
-        }
-    } else {
-        steam::find_game_install(&cli.appid)?
-    };
-
-    Ok(Resolved {
-        data_dir: install.data_dir(),
-        plugins_txt: install.plugins_txt_path(&cli.appid),
-        ccc_path: install.ccc_path(),
-        saves_dir: install.saves_dir(&cli.appid),
-    })
+/// List saves, reporting any that couldn't be parsed on stderr.
+fn list_saves(resolved: &GamePaths) -> Result<Vec<saves::SaveEntry>> {
+    let list = saves::list_saves(&resolved.saves_dir)?;
+    for skipped in &list.skipped {
+        eprintln!("warning: skipping {}: {:#}", skipped.file_name, skipped.error);
+    }
+    Ok(list.entries)
 }
 
 fn state_label(status: &plugins::PluginStatus) -> &'static str {
@@ -101,11 +83,8 @@ fn state_label(status: &plugins::PluginStatus) -> &'static str {
     }
 }
 
-fn cmd_list(resolved: &Resolved) -> Result<()> {
-    let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
-    let plugins_txt = plugins::parse_plugins_txt(&resolved.plugins_txt)?;
-    let ccc = plugins::parse_ccc(&resolved.ccc_path)?;
-    let statuses = plugins::build_status(&data_plugins, &plugins_txt, &ccc);
+fn cmd_list(resolved: &GamePaths) -> Result<()> {
+    let statuses = resolved.plugin_status()?;
 
     for status in &statuses {
         println!("{} {}", state_label(status), status.name);
@@ -137,7 +116,7 @@ fn warn_if_forced(data_plugins: &[plugins::DataPlugin], exact: &str) {
     }
 }
 
-fn cmd_enable(resolved: &Resolved, plugin: &str) -> Result<()> {
+fn cmd_enable(resolved: &GamePaths, plugin: &str) -> Result<()> {
     let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
     let exact = plugins::resolve_plugin_name(plugin, &data_plugins)?.to_string();
     warn_if_forced(&data_plugins, &exact);
@@ -151,7 +130,7 @@ fn cmd_enable(resolved: &Resolved, plugin: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_disable(resolved: &Resolved, plugin: &str) -> Result<()> {
+fn cmd_disable(resolved: &GamePaths, plugin: &str) -> Result<()> {
     let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
     let exact = plugins::resolve_plugin_name(plugin, &data_plugins)?.to_string();
     warn_if_forced(&data_plugins, &exact);
@@ -165,11 +144,8 @@ fn cmd_disable(resolved: &Resolved, plugin: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_edit(resolved: &Resolved) -> Result<()> {
-    let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
-    let plugins_txt = plugins::parse_plugins_txt(&resolved.plugins_txt)?;
-    let ccc = plugins::parse_ccc(&resolved.ccc_path)?;
-    let statuses = plugins::build_status(&data_plugins, &plugins_txt, &ccc);
+fn cmd_edit(resolved: &GamePaths) -> Result<()> {
+    let statuses = resolved.plugin_status()?;
 
     let saved = tui::run(&resolved.plugins_txt, statuses)?;
     if saved > 0 {
@@ -180,7 +156,7 @@ fn cmd_edit(resolved: &Resolved) -> Result<()> {
     Ok(())
 }
 
-fn cmd_paths(cli: &Cli, resolved: &Resolved) -> Result<()> {
+fn cmd_paths(cli: &Cli, resolved: &GamePaths) -> Result<()> {
     println!("appid:       {}", cli.appid);
     println!("data dir:    {}", resolved.data_dir.display());
     println!("plugins.txt: {}", resolved.plugins_txt.display());
@@ -189,45 +165,28 @@ fn cmd_paths(cli: &Cli, resolved: &Resolved) -> Result<()> {
     Ok(())
 }
 
-fn cmd_characters(resolved: &Resolved) -> Result<()> {
-    let entries = saves::list_saves(&resolved.saves_dir)?;
+fn cmd_characters(resolved: &GamePaths) -> Result<()> {
+    let entries = list_saves(resolved)?;
     if entries.is_empty() {
         println!("no saves found in {}", resolved.saves_dir.display());
         return Ok(());
     }
 
-    // `entries` is newest-first, so the first save seen per character is
-    // their latest; `order` preserves that recency across characters too.
-    let mut order: Vec<String> = Vec::new();
-    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    let mut latest: std::collections::HashMap<&str, &saves::SaveEntry> = std::collections::HashMap::new();
-    for entry in &entries {
-        let name = entry.header.player_name.as_str();
-        if !counts.contains_key(name) {
-            order.push(name.to_string());
-            latest.insert(name, entry);
-        }
-        *counts.entry(name).or_insert(0) += 1;
-    }
-
-    for name in &order {
-        let count = counts[name.as_str()];
-        let last = latest[name.as_str()];
-        let when = saves::save_timestamp(&last.file_name).unwrap_or_else(|| "unknown time".to_string());
+    for character in saves::characters(&entries) {
+        let last = &character.latest.header;
+        let when = saves::save_timestamp(&character.latest.file_name).unwrap_or_else(|| "unknown time".to_string());
+        let count = character.save_count;
         let plural = if count == 1 { "save" } else { "saves" };
         println!(
-            "{name} ({}) — {count} {plural}, latest: level {} at {} on {}, {when}",
-            last.header.player_race_editor_id,
-            last.header.player_level,
-            last.header.player_location,
-            last.header.game_date
+            "{} ({}) — {count} {plural}, latest: level {} at {} on {}, {when}",
+            character.name, last.player_race_editor_id, last.player_level, last.player_location, last.game_date
         );
     }
     Ok(())
 }
 
-fn cmd_saves(resolved: &Resolved, character: &str) -> Result<()> {
-    let entries = saves::list_saves(&resolved.saves_dir)?;
+fn cmd_saves(resolved: &GamePaths, character: &str) -> Result<()> {
+    let entries = list_saves(resolved)?;
     let name = saves::resolve_character(character, &entries)?;
 
     for entry in entries.iter().filter(|e| e.header.player_name == name) {
@@ -245,18 +204,15 @@ fn cmd_saves(resolved: &Resolved, character: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_save_plugins(resolved: &Resolved, save: &str) -> Result<()> {
-    let entries = saves::list_saves(&resolved.saves_dir)?;
+fn cmd_save_plugins(resolved: &GamePaths, save: &str) -> Result<()> {
+    let entries = list_saves(resolved)?;
     let entry = saves::resolve_save(save, &entries)?;
     let plugin_list = saves::read_plugins_from_file(&entry.path)?;
 
     // Same status resolution `list` uses (Data/ + Plugins.txt + Skyrim.ccc),
     // so a save's plugin shows whether it's actually active right now, not
     // just present on disk — a disabled mod is not the same as a missing one.
-    let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
-    let plugins_txt = plugins::parse_plugins_txt(&resolved.plugins_txt)?;
-    let ccc = plugins::parse_ccc(&resolved.ccc_path)?;
-    let statuses = plugins::build_status(&data_plugins, &plugins_txt, &ccc);
+    let statuses = resolved.plugin_status()?;
 
     let width = plugin_list.iter().map(|p| p.len()).max().unwrap_or(0);
     println!("{} — {} plugin(s):", entry.file_name, plugin_list.len());

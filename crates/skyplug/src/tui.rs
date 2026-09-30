@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::plugins::{self, PluginStatus, State};
+use skyplug_core::plugins::{self, PluginStatus, State};
 
 const HELP_TEXT: &str = "space: toggle  gg/G: top/bottom  /: filter  o: sort  s: save  q: quit";
 

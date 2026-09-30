@@ -98,5 +98,12 @@ reported as an error rather than silently skipped.
 ## Build
 
 ```sh
-cargo build --release
+cargo build --release   # binary at target/release/skyplug
 ```
+
+## Library (`skyplug-core`)
+
+The install discovery, `Plugins.txt` handling and save parsing live in a
+separate library crate, [`crates/skyplug-core`](crates/skyplug-core), so
+other tools can reuse them; see its README for the API. The CLI and TUI in
+`crates/skyplug` are built on top of it.

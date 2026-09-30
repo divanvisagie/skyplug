@@ -243,6 +243,7 @@ pub fn resolve_plugin_name<'a>(query: &str, data_plugins: &'a [DataPlugin]) -> R
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeResult {
     AlreadyInState,
     Toggled,
@@ -348,4 +349,45 @@ pub fn apply_changes(path: &Path, changes: &[(String, bool)]) -> Result<usize> {
         write_with_backup(path, &original, &lines)?;
     }
     Ok(applied)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data(name: &str, is_forced: bool) -> DataPlugin {
+        DataPlugin { name: name.to_string(), is_forced }
+    }
+
+    fn txt(name: &str, active: bool) -> PluginsTxtEntry {
+        PluginsTxtEntry { name: name.to_string(), active }
+    }
+
+    #[test]
+    fn merges_data_plugins_txt_and_ccc() {
+        let data_plugins = [data("Skyrim.esm", true), data("ccFish.esm", true), data("A.esp", false), data("B.esp", false)];
+        let plugins_txt = [txt("b.esp", true), txt("a.esp", false), txt("Gone.esp", true)];
+        let ccc = ["ccFish.esm".to_string()];
+
+        let statuses = build_status(&data_plugins, &plugins_txt, &ccc);
+        let get = |n: &str| statuses.iter().find(|s| s.name == n).unwrap();
+
+        assert_eq!(get("A.esp").state, State::Disabled);
+        assert_eq!(get("B.esp").state, State::Enabled);
+        assert_eq!(get("Gone.esp").state, State::Missing);
+        assert!(get("ccFish.esm").is_cc);
+        // CC first, then masters, then regular plugins in Plugins.txt order.
+        assert_eq!(get("ccFish.esm").load_order, Some(1));
+        assert_eq!(get("Skyrim.esm").load_order, Some(2));
+        assert_eq!(get("B.esp").load_order, Some(3));
+        assert_eq!(get("A.esp").load_order, None);
+    }
+
+    #[test]
+    fn resolves_plugin_by_stem_and_case() {
+        let data_plugins = [data("Paarthurnax Dilemma.esp", false), data("Foo.esp", false), data("Foo.esm", true)];
+        assert_eq!(resolve_plugin_name("paarthurnax dilemma", &data_plugins).unwrap(), "Paarthurnax Dilemma.esp");
+        assert_eq!(resolve_plugin_name("FOO.ESM", &data_plugins).unwrap(), "Foo.esm");
+        assert!(resolve_plugin_name("foo", &data_plugins).is_err());
+    }
 }

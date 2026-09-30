@@ -1323,8 +1323,16 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
- "lz4_flex",
  "ratatui",
+ "skyplug-core",
+]
+
+[[package]]
+name = "skyplug-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lz4_flex",
 ]
 
 [[package]]

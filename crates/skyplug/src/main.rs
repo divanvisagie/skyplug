@@ -41,7 +41,7 @@ enum Command {
     Enable { plugin: String },
     /// Disable a plugin (removes the `*` prefix in Plugins.txt).
     Disable { plugin: String },
-    /// Interactive TUI to enable/disable plugins.
+    /// Interactive TUI to enable/disable plugins and browse saves.
     Edit,
     /// Show the resolved game/Plugins.txt paths and exit.
     Paths,
@@ -147,7 +147,7 @@ fn cmd_disable(resolved: &GamePaths, plugin: &str) -> Result<()> {
 fn cmd_edit(resolved: &GamePaths) -> Result<()> {
     let statuses = resolved.plugin_status()?;
 
-    let saved = tui::run(&resolved.plugins_txt, statuses)?;
+    let saved = tui::run(&resolved.plugins_txt, &resolved.saves_dir, statuses)?;
     if saved > 0 {
         println!("saved {saved} change(s) to {}", resolved.plugins_txt.display());
     } else {

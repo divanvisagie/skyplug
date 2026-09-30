@@ -5,7 +5,7 @@ Command-line tool for inspecting and toggling Skyrim Special Edition's
 
 It scans the game's `Data` directory for `.esp`/`.esm`/`.esl` files, reads
 each plugin's header to see if it's a master (which the engine always
-loads, regardless of `Plugins.txt` — the light-master/ESL bit does *not*
+loads, regardless of `Plugins.txt`; the light-master/ESL bit does *not*
 have this effect, a light-flagged plugin still needs to be active in
 `Plugins.txt`), cross-references `Plugins.txt` and `Skyrim.ccc`, and
 reports what's actually active.
@@ -21,7 +21,7 @@ save depends on before pruning mods.
 skyplug list              # show every plugin and its state
 skyplug enable <plugin>   # add/set the `*` prefix in Plugins.txt
 skyplug disable <plugin>  # remove the `*` prefix in Plugins.txt
-skyplug edit               # interactive TUI to enable/disable plugins
+skyplug edit              # interactive TUI: toggle plugins, browse saves
 skyplug paths             # print the resolved Data/Plugins.txt/Skyrim.ccc/Saves paths
 
 skyplug characters                # list every character across all saves
@@ -31,16 +31,37 @@ skyplug save-plugins <save>       # list the plugins active in a specific save
 
 ### `edit` (TUI)
 
-- `↑`/`↓` or `j`/`k` — move selection
+Two tabs, switched with `tab`: **Plugins** and **Saves**.
+
+Everywhere:
+
+- `↑`/`↓` or `j`/`k` — move selection; `gg`/`G` — jump to top/bottom
+- `tab` — switch between Plugins and Saves
+- `s` — save plugin changes and quit
+- `q`/`esc` — quit; if there are unsaved changes, prompts once more before discarding
+
+Plugins tab:
+
 - `space`/`enter` — toggle the selected plugin
 - `/` — filter by substring (live, case-insensitive); `↑`/`↓` still move while typing, `enter` keeps the filter, `esc` cancels back to what it was
-- `s` — save changes and quit
-- `q`/`esc` — quit; if there are unsaved changes, prompts once more before discarding
+- `o` — cycle sort: load order, name, type, enabled
 
 Changes are only written to `Plugins.txt` on `s`; toggles made while browsing
 are kept in memory until then, shown with a trailing `*`. Master/light-master
 and missing plugins can't be toggled (toggling them would have no effect, or
 nothing to toggle) — selecting them shows why in the status bar instead.
+
+Saves tab — drill down from characters, to a character's saves, to the
+plugins a save was made with:
+
+- `enter`/`l`/`→` — open the selected character or save
+- `esc`/`h`/`←`/`backspace` — go back up a level (`esc` at the top quits)
+
+Each of a save's plugins is marked against your current setup, including
+toggles you haven't saved yet: `[x]` active, `[ ]` disabled, `[!]` missing
+from Data, `[M]`/`[CC]` always loaded. A summary line counts how many are
+missing or disabled, so you can flip to the Plugins tab, enable what the
+save needs, and see it resolve before saving.
 
 `<plugin>` can be the exact filename, a different case, or just the name
 without its extension (e.g. `skyplug enable "paarthurnax dilemma"` matches

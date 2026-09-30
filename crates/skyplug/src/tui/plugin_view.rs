@@ -1,16 +1,13 @@
-use std::path::Path;
-
-use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Layout};
+use crossterm::event::KeyCode;
+use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use ratatui::{DefaultTerminal, Frame};
 
-use skyplug_core::plugins::{self, PluginStatus, State};
+use skyplug_core::plugins::{PluginStatus, State};
 
-const HELP_TEXT: &str = "space: toggle  gg/G: top/bottom  /: filter  o: sort  s: save  q: quit";
+const HELP_TEXT: &str = "space: toggle  gg/G: top/bottom  /: filter  o: sort  tab: saves  s: save  q: quit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortMode {
@@ -52,14 +49,14 @@ fn type_rank(name: &str) -> u8 {
     }
 }
 
-struct Row {
-    status: PluginStatus,
+pub(super) struct Row {
+    pub(super) status: PluginStatus,
     /// Desired active state if the user has toggled it away from `status.state`.
-    pending: Option<bool>,
+    pub(super) pending: Option<bool>,
 }
 
 impl Row {
-    fn effective_active(&self) -> bool {
+    pub(super) fn effective_active(&self) -> bool {
         self.pending.unwrap_or(self.status.state == State::Enabled)
     }
 
@@ -68,13 +65,12 @@ impl Row {
     }
 }
 
-struct App {
+/// The Plugins tab: every plugin with its state, toggled in memory until
+/// the app saves.
+pub(super) struct PluginsView {
     rows: Vec<Row>,
     list_state: ListState,
     message: String,
-    confirm_discard: bool,
-    quit: bool,
-    save_on_exit: bool,
     filter: String,
     editing_filter: bool,
     filter_before_edit: String,
@@ -84,8 +80,9 @@ struct App {
     pending_g: bool,
 }
 
-impl App {
-    fn new(rows: Vec<Row>) -> Self {
+impl PluginsView {
+    pub(super) fn new(statuses: Vec<PluginStatus>) -> Self {
+        let rows: Vec<Row> = statuses.into_iter().map(|status| Row { status, pending: None }).collect();
         let mut list_state = ListState::default();
         if !rows.is_empty() {
             list_state.select(Some(0));
@@ -94,9 +91,6 @@ impl App {
             rows,
             list_state,
             message: HELP_TEXT.to_string(),
-            confirm_discard: false,
-            quit: false,
-            save_on_exit: false,
             filter: String::new(),
             editing_filter: false,
             filter_before_edit: String::new(),
@@ -105,8 +99,18 @@ impl App {
         }
     }
 
-    fn dirty_count(&self) -> usize {
+    pub(super) fn dirty_count(&self) -> usize {
         self.rows.iter().filter(|r| r.pending.is_some()).count()
+    }
+
+    /// True while typing a filter, when every key belongs to this view.
+    pub(super) fn is_editing(&self) -> bool {
+        self.editing_filter
+    }
+
+    /// The row for `name` (case-insensitive), if it's in Data or Plugins.txt.
+    pub(super) fn row(&self, name: &str) -> Option<&Row> {
+        self.rows.iter().find(|r| r.status.name.eq_ignore_ascii_case(name))
     }
 
     /// Indices into `rows` of the plugins currently matching `filter`, in
@@ -152,7 +156,6 @@ impl App {
         let filtered = self.filtered_indices();
         let new_pos = selected_row_idx.and_then(|row_idx| filtered.iter().position(|&i| i == row_idx));
         self.list_state.select(new_pos.or(if filtered.is_empty() { None } else { Some(0) }));
-        self.confirm_discard = false;
         self.message = format!("sorted by {}", self.sort_mode.label());
     }
 
@@ -174,14 +177,12 @@ impl App {
         let current = self.list_state.selected().unwrap_or(0) as i32;
         let next = (current + delta).rem_euclid(len);
         self.list_state.select(Some(next as usize));
-        self.confirm_discard = false;
     }
 
     fn select_first(&mut self) {
         if !self.filtered_indices().is_empty() {
             self.list_state.select(Some(0));
         }
-        self.confirm_discard = false;
     }
 
     fn select_last(&mut self) {
@@ -189,7 +190,6 @@ impl App {
         if filtered_len > 0 {
             self.list_state.select(Some(filtered_len - 1));
         }
-        self.confirm_discard = false;
     }
 
     fn toggle_selected(&mut self) {
@@ -197,7 +197,6 @@ impl App {
         let Some(pos) = self.list_state.selected() else { return };
         let Some(&row_idx) = filtered.get(pos) else { return };
         let row = &mut self.rows[row_idx];
-        self.confirm_discard = false;
 
         if !row.is_toggleable() {
             self.message = if row.status.state == State::Missing {
@@ -217,7 +216,7 @@ impl App {
         self.message = HELP_TEXT.to_string();
     }
 
-    fn pending_changes(&self) -> Vec<(String, bool)> {
+    pub(super) fn pending_changes(&self) -> Vec<(String, bool)> {
         self.rows
             .iter()
             .filter_map(|r| r.pending.map(|want| (r.status.name.clone(), want)))
@@ -227,7 +226,6 @@ impl App {
     fn start_filter_edit(&mut self) {
         self.filter_before_edit = self.filter.clone();
         self.editing_filter = true;
-        self.confirm_discard = false;
     }
 
     fn commit_filter_edit(&mut self) {
@@ -243,31 +241,23 @@ impl App {
         self.clamp_selection(len);
     }
 
-    fn draw(&mut self, frame: &mut Frame) {
-        let [header_area, list_area, footer_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
-
-        let filtered = self.filtered_indices();
-
-        let dirty = self.dirty_count();
-        let mut header_text = String::from("skyplug");
-        header_text.push_str(&format!(" \u{2014} sort: {}", self.sort_mode.label()));
-        if dirty > 0 {
-            header_text.push_str(&format!(" \u{2014} {dirty} unsaved change(s)"));
-        }
+    /// View-specific part of the header line.
+    pub(super) fn header_info(&self) -> String {
+        let mut info = format!("sort: {}", self.sort_mode.label());
         if !self.filter.is_empty() {
-            header_text.push_str(&format!(" \u{2014} filter \"{}\" ({}/{})", self.filter, filtered.len(), self.rows.len()));
+            let shown = self.filtered_indices().len();
+            info.push_str(&format!(" \u{2014} filter \"{}\" ({shown}/{})", self.filter, self.rows.len()));
         }
-        frame.render_widget(
-            Paragraph::new(header_text).style(Style::default().add_modifier(Modifier::BOLD)),
-            header_area,
-        );
+        info
+    }
 
-        let items: Vec<ListItem> = filtered
+    pub(super) fn footer(&self) -> String {
+        if self.editing_filter { format!("/{}_", self.filter) } else { self.message.clone() }
+    }
+
+    pub(super) fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        let items: Vec<ListItem> = self
+            .filtered_indices()
             .iter()
             .map(|&idx| {
                 let row = &self.rows[idx];
@@ -302,27 +292,23 @@ impl App {
         if items.is_empty() {
             frame.render_widget(
                 Paragraph::new(format!("no plugins match \"{}\"", self.filter)).block(list_block),
-                list_area,
+                area,
             );
         } else {
             let list = List::new(items)
                 .block(list_block)
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                 .highlight_symbol("> ");
-            frame.render_stateful_widget(list, list_area, &mut self.list_state);
-        }
-
-        if self.editing_filter {
-            frame.render_widget(Paragraph::new(format!("/{}_", self.filter)), footer_area);
-        } else {
-            frame.render_widget(Paragraph::new(self.message.as_str()), footer_area);
+            frame.render_stateful_widget(list, area, &mut self.list_state);
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode) {
+    /// Handle a key the app didn't claim. Returns false only for an `Esc`
+    /// with nothing to clear, so the app can treat it as quit.
+    pub(super) fn handle_key(&mut self, code: KeyCode) -> bool {
         if self.editing_filter {
             self.handle_filter_key(code);
-            return;
+            return true;
         }
 
         if !matches!(code, KeyCode::Char('g')) {
@@ -344,28 +330,16 @@ impl App {
                     self.pending_g = true;
                 }
             }
-            KeyCode::Char('s') => {
-                self.save_on_exit = true;
-                self.quit = true;
-            }
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
                 let len = self.filtered_indices().len();
                 self.clamp_selection(len);
-                self.confirm_discard = false;
                 self.message = HELP_TEXT.to_string();
             }
-            KeyCode::Char('q') | KeyCode::Esc => {
-                if self.dirty_count() > 0 && !self.confirm_discard {
-                    self.confirm_discard = true;
-                    self.message =
-                        "unsaved changes \u{2014} press q again to discard, or s to save".to_string();
-                } else {
-                    self.quit = true;
-                }
-            }
+            KeyCode::Esc => return false,
             _ => {}
         }
+        true
     }
 
     fn handle_filter_key(&mut self, code: KeyCode) {
@@ -385,42 +359,6 @@ impl App {
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             _ => {}
-        }
-    }
-}
-
-/// Run the interactive plugin editor. Returns the number of changes saved
-/// (0 if the user quit without saving).
-pub fn run(plugins_txt: &Path, statuses: Vec<PluginStatus>) -> Result<usize> {
-    let rows = statuses.into_iter().map(|status| Row { status, pending: None }).collect();
-    let mut app = App::new(rows);
-
-    let mut terminal = ratatui::init();
-    let result = run_loop(&mut terminal, &mut app);
-    ratatui::restore();
-    result?;
-
-    if !app.save_on_exit || app.dirty_count() == 0 {
-        return Ok(0);
-    }
-
-    let changes = app.pending_changes();
-    plugins::apply_changes(plugins_txt, &changes)
-}
-
-fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
-    loop {
-        terminal.draw(|frame| app.draw(frame))?;
-
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            app.handle_key(key.code);
-        }
-
-        if app.quit {
-            return Ok(());
         }
     }
 }

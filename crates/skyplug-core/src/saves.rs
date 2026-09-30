@@ -263,9 +263,9 @@ pub struct SaveList {
     pub skipped: Vec<SkippedSave>,
 }
 
-/// List every `.ess` save in `dir`, newest first by filename (Skyrim embeds
-/// a `YYYYMMDDHHMMSS` timestamp in the filename, so this is also
-/// chronological). Files whose header can't be parsed are reported in
+/// List every `.ess` save in `dir`, newest first by the write time recorded
+/// in each save's header. (Not by filename: the `SaveN_` prefix sorts
+/// `Save9_` after `Save16_`.) Files whose header can't be parsed are reported in
 /// `skipped` rather than failing the whole listing.
 pub fn list_saves(dir: &Path) -> Result<SaveList> {
     let mut list = SaveList::default();
@@ -287,7 +287,9 @@ pub fn list_saves(dir: &Path) -> Result<SaveList> {
         }
     }
 
-    list.entries.sort_by(|a, b| b.file_name.cmp(&a.file_name));
+    list.entries.sort_by(|a, b| {
+        b.header.filetime.cmp(&a.header.filetime).then_with(|| b.file_name.cmp(&a.file_name))
+    });
     Ok(list)
 }
 

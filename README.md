@@ -1,5 +1,7 @@
 # skyplug
 
+[![crates.io](https://img.shields.io/crates/v/skyplug?style=for-the-badge&logo=rust&logoColor=white)](https://crates.io/crates/skyplug)
+
 Command-line tool for inspecting and toggling Skyrim Special Edition's
 `Plugins.txt` load order on Linux/Steam, without a mod manager.
 

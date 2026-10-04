@@ -8,14 +8,14 @@ cross-references `Plugins.txt` and `Skyrim.ccc`, and reports what's
 actually active. Only the base game/DLC masters (`Skyrim.esm`,
 `Update.esm`, `Dawnguard.esm`, `HearthFires.esm`, `Dragonborn.esm`) and
 Creation Club content listed in `Skyrim.ccc` load regardless of
-`Plugins.txt`; every other plugin — including mod `.esm`s and
-master-flagged `.esp`s like USSEP — needs `*` there to load. The header's
+`Plugins.txt`. Every other plugin needs `*` there to load, including mod
+`.esm`s and master-flagged `.esp`s like USSEP. The header's
 master flag is still read, but only to place masters ahead of regular
 plugins in the load order.
 
 It can also read `.ess` save files directly, to answer "which character is
 this," "what saves does this character have," and "which mods were
-actually active when this save was made" — handy for figuring out what a
+actually active when this save was made". That makes it easy to see what a
 save depends on before pruning mods.
 
 ## Usage
@@ -41,27 +41,30 @@ Two tabs, switched with `tab`: **Plugins** and **Saves**.
 
 Everywhere:
 
-- `↑`/`↓` or `j`/`k` — move selection; `gg`/`G` — jump to top/bottom
-- `tab` — switch between Plugins and Saves
-- `s` — save plugin changes and quit
-- `q`/`esc` — quit; if there are unsaved changes, prompts once more before discarding
+- `↑`/`↓` or `j`/`k`: move the selection
+- `gg`/`G`: jump to the top or bottom
+- `tab`: switch between Plugins and Saves
+- `s`: save plugin changes and quit
+- `q`/`esc`: quit, asking once more first if there are unsaved changes
 
 Plugins tab:
 
-- `space`/`enter` — toggle the selected plugin
-- `/` — filter by substring (live, case-insensitive); `↑`/`↓` still move while typing, `enter` keeps the filter, `esc` cancels back to what it was
-- `o` — cycle sort: load order, name, type, enabled
+- `space`/`enter`: toggle the selected plugin
+- `/`: filter by substring as you type (case-insensitive); `↑`/`↓` still
+  move while typing, `enter` keeps the filter and `esc` restores the old one
+- `o`: cycle the sort order between load order, name, type and enabled
 
-Changes are only written to `Plugins.txt` on `s`; toggles made while browsing
-are kept in memory until then, shown with a trailing `*`. Base game/DLC masters,
-Creation Club content, and missing plugins can't be toggled (toggling them would have no effect, or
-nothing to toggle) — selecting them shows why in the status bar instead.
+Changes are only written to `Plugins.txt` on `s`; until then, toggles are
+kept in memory and shown with a trailing `*`. Base game/DLC masters and
+Creation Club content always load, and missing plugins have nothing to
+toggle, so none of these can be toggled. Selecting one shows why in the
+status bar instead.
 
-Saves tab — drill down from characters, to a character's saves, to the
+The Saves tab drills down from characters, to a character's saves, to the
 plugins a save was made with:
 
-- `enter`/`l`/`→` — open the selected character or save
-- `esc`/`h`/`←`/`backspace` — go back up a level (`esc` at the top quits)
+- `enter`/`l`/`→`: open the selected character or save
+- `esc`/`h`/`←`/`backspace`: go back up a level (`esc` at the top quits)
 
 Each of a save's plugins is marked against your current setup, including
 toggles you haven't saved yet: `[x]` active, `[ ]` disabled, `[!]` missing
@@ -78,15 +81,15 @@ without its extension (e.g. `skyplug enable "paarthurnax dilemma"` matches
 ```
 [x] SomeMod.esp     enabled via Plugins.txt
 [ ] OtherMod.esp     present in Data but not active
-[M] Skyrim.esm       base game/DLC master — always loaded, Plugins.txt is irrelevant
-[CC] ccBGSSSE001-Fish.esm   Creation Club content — always loaded
+[M] Skyrim.esm       base game/DLC master, always loaded whatever Plugins.txt says
+[CC] ccBGSSSE001-Fish.esm   Creation Club content, always loaded
 [!] Missing.esp      listed in Plugins.txt but no longer in Data
 ```
 
 Game install and Proton prefix are auto-detected across your Steam
 libraries, by matching which library actually *owns* the AppID (per
 `libraryfolders.vdf`) rather than just probing for a folder that happens to
-exist — a stale install left behind in another library won't be picked by
+exist, so a stale install left behind in another library won't be picked by
 mistake. Override with `--game-dir` and `--appid` if needed (e.g. for
 Skyrim VR: `--appid 611670`).
 
@@ -105,22 +108,22 @@ $ skyplug save-plugins Quicksave0_..._1_1
 Quicksave0_..._1_1.ess — 17 plugin(s):
   Skyrim.esm                                   [M]  native (base game/DLC)
   ccasvsse001-almsivi.esm                      [CC] creation club
-  unofficial skyrim special edition patch.esp  [OK] installed
+  unofficial skyrim special edition patch.esp  [x] installed and active
   SomeRemovedMod.esp                           [!]  missing from Data
 ```
 
 `saves <character>` and `save-plugins <save>` both accept an exact match,
-a case-insensitive match, or (for saves) an unambiguous substring —
-resolution fails with the list of candidates if a query is ambiguous.
+a case-insensitive match, or an unambiguous substring. An ambiguous query
+fails and lists the candidates.
 
-`save-plugins` cross-references each plugin the save recorded as active
-against what's actually in `Data/` right now — useful for seeing which of
-an old save's mods you'd need to reinstall before loading it again.
+`save-plugins` checks each plugin the save recorded as active against your
+current setup, which shows which of an old save's mods you'd need to
+reinstall or enable before loading it again.
 
-Save parsing reads the `.ess` header directly (magic string, header
-block, and — for `save-plugins` — the LZ4-compressed body) rather than
-shelling out to anything; unsupported/corrupt save compression types are
-reported as an error rather than silently skipped.
+Save parsing reads the `.ess` file directly rather than shelling out to
+anything: the magic string and header block, plus the LZ4-compressed body
+for `save-plugins`. Unsupported compression types and corrupt saves are
+reported as errors rather than silently skipped.
 
 ## Build
 

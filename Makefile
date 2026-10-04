@@ -7,7 +7,7 @@ RELEASE_BRANCH := master
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build install test lint publish-check publish
+.PHONY: help build install test lint docs publish-check publish
 
 help: ## Show this help
 	@echo "Usage: make <target>"
@@ -25,6 +25,13 @@ test: ## Run all workspace tests
 
 lint: ## Run clippy across the workspace
 	cargo clippy --workspace --all-targets
+
+docs: docs/index.html ## Render the man page to docs/index.html (needs mandoc)
+
+docs/index.html: crates/skyplug/man/skyplug.1
+	@command -v mandoc >/dev/null || { echo "mandoc not found — install it (e.g. apt install mandoc)"; exit 1; }
+	mandoc -T lint -W warning $<
+	mandoc -T html -O style=style.css,man=https://man7.org/linux/man-pages/man%S/%N.%S.html $< > $@
 
 publish-check: ## Verify both crates can be published (on master, clean, pushed, versions in sync, dry run passes)
 	@test "$(CORE_REQ)" = "$(VERSION)" || { echo "crates/skyplug/Cargo.toml requires skyplug-core $(CORE_REQ), but the workspace version is $(VERSION)"; exit 1; }

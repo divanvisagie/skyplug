@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <link rel="stylesheet" href="style.css" type="text/css" media="all"/>
+  <title>SKYPLUG(1)</title>
+</head>
+<body>
+<table class="head">
+  <tr>
+    <td class="head-ltitle">SKYPLUG(1)</td>
+    <td class="head-vol">General Commands Manual</td>
+    <td class="head-rtitle">SKYPLUG(1)</td>
+  </tr>
+</table>
+<div class="manual-text">
+<section class="Sh">
+<h1 class="Sh" id="NAME"><a class="permalink" href="#NAME">NAME</a></h1>
+<p class="Pp"><code class="Nm">skyplug</code> &#x2014; <span class="Nd">inspect
+    and toggle Skyrim Special Edition plugins on Linux/Steam</span></p>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="SYNOPSIS"><a class="permalink" href="#SYNOPSIS">SYNOPSIS</a></h1>
+<table class="Nm">
+  <tr>
+    <td><code class="Nm">skyplug</code></td>
+    <td>[<code class="Fl">--game-dir</code> <var class="Ar">dir</var>]
+      [<code class="Fl">--appid</code> <var class="Ar">appid</var>]
+      <var class="Ar">command</var> [<var class="Ar">args</var>]</td>
+  </tr>
+</table>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="DESCRIPTION"><a class="permalink" href="#DESCRIPTION">DESCRIPTION</a></h1>
+<p class="Pp"><code class="Nm">skyplug</code> reads and edits the
+    <span class="Pa">Plugins.txt</span> load order of a Skyrim Special Edition
+    install running under Proton, without a mod manager. It scans the game's
+    <span class="Pa">Data</span> directory for <span class="Pa">.esp</span>,
+    <span class="Pa">.esm</span> and <span class="Pa">.esl</span> files,
+    cross-references them with <span class="Pa">Plugins.txt</span> and
+    <span class="Pa">Skyrim.ccc</span>, and reports what the engine will
+    actually load.</p>
+<p class="Pp">It can also read <span class="Pa">.ess</span> save files directly,
+    to show which characters exist, which saves belong to each, and which
+    plugins were active when a save was made.</p>
+<section class="Ss">
+<h2 class="Ss" id="What_loads"><a class="permalink" href="#What_loads">What
+  loads</a></h2>
+<p class="Pp">Only two kinds of plugin load regardless of
+    <span class="Pa">Plugins.txt</span>:</p>
+<ul class="Bl-bullet">
+  <li>the base game and DLC masters: <span class="Pa">Skyrim.esm</span>,
+      <span class="Pa">Update.esm</span>, <span class="Pa">Dawnguard.esm</span>,
+      <span class="Pa">HearthFires.esm</span> and
+      <span class="Pa">Dragonborn.esm</span>;</li>
+  <li>Creation Club content listed in <span class="Pa">Skyrim.ccc</span>.</li>
+</ul>
+<p class="Pp">Every other plugin, including mod <span class="Pa">.esm</span>
+    files and <span class="Pa">.esp</span> files carrying the master flag, loads
+    only when it is prefixed with &#x2018;<code class="Li">*</code>&#x2019; in
+    <span class="Pa">Plugins.txt</span>. The master flag in a plugin's header
+    only affects where it loads: masters load ahead of regular plugins.</p>
+<p class="Pp">The load order <code class="Nm">skyplug</code> shows is an
+    approximation: base game masters in their fixed order, then Creation Club
+    content in <span class="Pa">Skyrim.ccc</span> order, then active masters,
+    then active regular plugins, each group in
+    <span class="Pa">Plugins.txt</span> order. The engine additionally sorts
+    masters by their dependencies, which <code class="Nm">skyplug</code> does
+    not parse.</p>
+</section>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="COMMANDS"><a class="permalink" href="#COMMANDS">COMMANDS</a></h1>
+<dl class="Bl-tag">
+  <dt id="list"><a class="permalink" href="#list"><code class="Cm">list</code></a></dt>
+  <dd>List every plugin in <span class="Pa">Data</span>, plus any listed in
+      <span class="Pa">Plugins.txt</span> that no longer exist, each with a
+      status marker:
+    <p class="Pp"></p>
+    <dl class="Bl-tag Bl-compact">
+      <dt id="_x_"><a class="permalink" href="#_x_"><code class="Li">[x]</code></a></dt>
+      <dd>enabled in <span class="Pa">Plugins.txt</span></dd>
+      <dt id="_"><a class="permalink" href="#_"><code class="Li">[&#x00A0;]</code></a></dt>
+      <dd>present in <span class="Pa">Data</span> but not enabled</dd>
+      <dt id="_!_"><a class="permalink" href="#_!_"><code class="Li">[!]</code></a></dt>
+      <dd>listed in <span class="Pa">Plugins.txt</span> but missing from
+          <span class="Pa">Data</span></dd>
+      <dt id="_M_"><a class="permalink" href="#_M_"><code class="Li">[M]</code></a></dt>
+      <dd>base game/DLC master, always loaded</dd>
+      <dt id="_CC_"><a class="permalink" href="#_CC_"><code class="Li">[CC]</code></a></dt>
+      <dd>Creation Club content, always loaded</dd>
+    </dl>
+  </dd>
+  <dt id="enable"><a class="permalink" href="#enable"><code class="Cm">enable</code></a>
+    <var class="Ar">plugin</var></dt>
+  <dd>Enable <var class="Ar">plugin</var> by setting its
+      &#x2018;<code class="Li">*</code>&#x2019; prefix in
+      <span class="Pa">Plugins.txt</span>, adding it to the end of the file if
+      it is not listed yet.</dd>
+  <dt id="disable"><a class="permalink" href="#disable"><code class="Cm">disable</code></a>
+    <var class="Ar">plugin</var></dt>
+  <dd>Disable <var class="Ar">plugin</var> by removing its
+      &#x2018;<code class="Li">*</code>&#x2019; prefix. A plugin not listed in
+      <span class="Pa">Plugins.txt</span> is left alone.</dd>
+  <dt id="edit"><a class="permalink" href="#edit"><code class="Cm">edit</code></a></dt>
+  <dd>Open the interactive editor; see
+    <a class="Sx" href="#EDITOR">EDITOR</a>.</dd>
+  <dt id="paths"><a class="permalink" href="#paths"><code class="Cm">paths</code></a></dt>
+  <dd>Print the resolved <span class="Pa">Data</span>,
+      <span class="Pa">Plugins.txt</span>, <span class="Pa">Skyrim.ccc</span>
+      and saves paths, then exit. Useful for checking that auto-detection found
+      the right install.</dd>
+  <dt id="characters"><a class="permalink" href="#characters"><code class="Cm">characters</code></a></dt>
+  <dd>List every character across all saves, with the number of saves each has
+      and details of the most recent one.</dd>
+  <dt id="saves"><a class="permalink" href="#saves"><code class="Cm">saves</code></a>
+    <var class="Ar">character</var></dt>
+  <dd>List every save belonging to <var class="Ar">character</var>.</dd>
+  <dt id="save-plugins"><a class="permalink" href="#save-plugins"><code class="Cm">save-plugins</code></a>
+    <var class="Ar">save</var></dt>
+  <dd>List the plugins that were active when <var class="Ar">save</var> was
+      made, each marked against the current setup with the same markers as
+      <code class="Cm">list</code>.</dd>
+  <dt id="man"><a class="permalink" href="#man"><code class="Cm">man</code></a>
+    [<code class="Fl">--install</code>]</dt>
+  <dd>Print this manual page to standard output. With
+      <code class="Fl">--install</code>, write it to
+      <span class="Pa">../share/man/man1/skyplug.1</span> relative to the
+      directory holding the <code class="Nm">skyplug</code> binary instead, and
+      print the path written.</dd>
+</dl>
+<p class="Pp"><var class="Ar">plugin</var> may be the exact filename, the
+    filename in a different case, or the name without its extension.
+    <var class="Ar">character</var> matches a player name exactly or by
+    case-insensitive substring. <var class="Ar">save</var> matches a save's
+    filename with or without <span class="Pa">.ess</span>, or an unambiguous
+    substring of it. An ambiguous match fails and lists the candidates.</p>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="OPTIONS"><a class="permalink" href="#OPTIONS">OPTIONS</a></h1>
+<dl class="Bl-tag">
+  <dt id="game-dir"><a class="permalink" href="#game-dir"><code class="Fl">--game-dir</code></a>
+    <var class="Ar">dir</var></dt>
+  <dd>Use the Skyrim Special Edition install in <var class="Ar">dir</var> (the
+      directory containing <span class="Pa">SkyrimSE.exe</span>) instead of
+      searching the Steam libraries. The Proton prefix is looked up in the Steam
+      library that contains <var class="Ar">dir</var>.</dd>
+  <dt id="appid"><a class="permalink" href="#appid"><code class="Fl">--appid</code></a>
+    <var class="Ar">appid</var></dt>
+  <dd>Steam AppID used to locate the game and its Proton prefix. Defaults to
+      489830, Skyrim Special Edition.</dd>
+  <dt id="h"><a class="permalink" href="#h"><code class="Fl">-h</code></a>,
+    <code class="Fl">--help</code></dt>
+  <dd>Print a short usage summary.</dd>
+  <dt id="V"><a class="permalink" href="#V"><code class="Fl">-V</code></a>,
+    <code class="Fl">--version</code></dt>
+  <dd>Print the version.</dd>
+</dl>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="EDITOR"><a class="permalink" href="#EDITOR">EDITOR</a></h1>
+<p class="Pp"><code class="Cm">edit</code> has two tabs,
+    <a class="permalink" href="#Plugins"><b class="Sy" id="Plugins">Plugins</b></a>
+    and
+    <a class="permalink" href="#Saves"><b class="Sy" id="Saves">Saves</b></a>,
+    switched with <code class="Ic">tab</code>.</p>
+<p class="Pp">In both tabs:</p>
+<dl class="Bl-tag Bl-compact">
+  <dt id="j"><a class="permalink" href="#j"><code class="Ic">j</code></a>,
+    <code class="Ic">k</code>, <code class="Ic">up</code>,
+    <code class="Ic">down</code></dt>
+  <dd>move the selection</dd>
+  <dt id="gg"><a class="permalink" href="#gg"><code class="Ic">gg</code></a>,
+    <code class="Ic">G</code></dt>
+  <dd>jump to the top or bottom</dd>
+  <dt id="tab"><a class="permalink" href="#tab"><code class="Ic">tab</code></a></dt>
+  <dd>switch tab</dd>
+  <dt id="s"><a class="permalink" href="#s"><code class="Ic">s</code></a></dt>
+  <dd>save plugin changes and quit</dd>
+  <dt id="q"><a class="permalink" href="#q"><code class="Ic">q</code></a>,
+    <code class="Ic">esc</code></dt>
+  <dd>quit, asking again first if there are unsaved changes</dd>
+</dl>
+<p class="Pp">In the Plugins tab:</p>
+<dl class="Bl-tag Bl-compact">
+  <dt id="space"><a class="permalink" href="#space"><code class="Ic">space</code></a>,
+    <code class="Ic">enter</code></dt>
+  <dd>toggle the selected plugin</dd>
+  <dt id="/"><a class="permalink" href="#/"><code class="Ic">/</code></a></dt>
+  <dd>filter by substring as you type; <code class="Ic">enter</code> keeps the
+      filter, <code class="Ic">esc</code> restores the previous one</dd>
+  <dt id="o"><a class="permalink" href="#o"><code class="Ic">o</code></a></dt>
+  <dd>cycle the sort order: load order, name, type, enabled</dd>
+</dl>
+<p class="Pp">Toggles are held in memory and marked with a trailing
+    &#x2018;<code class="Li">*</code>&#x2019; until saved with
+    <code class="Ic">s</code>. Always-loaded and missing plugins cannot be
+    toggled.</p>
+<p class="Pp">In the Saves tab, which goes from characters to their saves to a
+    save's plugins:</p>
+<dl class="Bl-tag Bl-compact">
+  <dt id="l"><a class="permalink" href="#l"><code class="Ic">l</code></a>,
+    <code class="Ic">right</code>, <code class="Ic">enter</code></dt>
+  <dd>open the selected character or save</dd>
+  <dt id="h~2"><a class="permalink" href="#h~2"><code class="Ic">h</code></a>,
+    <code class="Ic">left</code>, <code class="Ic">backspace</code></dt>
+  <dd>go back up a level</dd>
+  <dt id="esc"><a class="permalink" href="#esc"><code class="Ic">esc</code></a></dt>
+  <dd>go back up a level, or quit at the top</dd>
+</dl>
+<p class="Pp">A save's plugins are marked against the current setup, including
+    unsaved toggles, so you can enable what a save needs in the Plugins tab and
+    check it in the Saves tab before saving.</p>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="FILES"><a class="permalink" href="#FILES">FILES</a></h1>
+<p class="Pp">Paths are shown relative to the Steam library holding the game,
+    <var class="Ar">lib</var>, and to the Proton user directory inside it,
+    <var class="Ar">user</var>, which is
+    <span class="Pa">lib/steamapps/compatdata/489830/pfx/drive_c/users/steamuser</span>
+    for the default AppID. <code class="Cm">paths</code> prints the resolved
+    ones.</p>
+<dl class="Bl-tag">
+  <dt><span class="Pa">lib/steamapps/common/Skyrim Special
+    Edition/Data/</span></dt>
+  <dd>Installed plugins.</dd>
+  <dt><span class="Pa">lib/steamapps/common/Skyrim Special
+    Edition/Skyrim.ccc</span></dt>
+  <dd>Creation Club plugins the engine always loads.</dd>
+  <dt><span class="Pa">user/AppData/Local/Skyrim Special
+    Edition/Plugins.txt</span></dt>
+  <dd>The load order. <code class="Nm">skyplug</code> writes
+      <span class="Pa">Plugins.txt.bak</span> beside it before every
+    change.</dd>
+  <dt><span class="Pa">user/Documents/My Games/Skyrim Special
+    Edition/Saves/</span></dt>
+  <dd>Save files.</dd>
+  <dt><span class="Pa">~/.local/share/Steam</span>,
+    <span class="Pa">~/.steam/steam</span>,
+    <span class="Pa">~/.steam/root</span></dt>
+  <dd>Steam installs searched for <span class="Pa">libraryfolders.vdf</span>,
+      along with the Flatpak install under
+      <span class="Pa">~/.var/app/com.valvesoftware.Steam</span>.</dd>
+</dl>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="EXIT_STATUS"><a class="permalink" href="#EXIT_STATUS">EXIT
+  STATUS</a></h1>
+<p class="Pp">The <code class="Nm">skyplug</code> utility exits&#x00A0;0 on
+    success, and&#x00A0;&gt;0 if an error occurs.</p>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="EXAMPLES"><a class="permalink" href="#EXAMPLES">EXAMPLES</a></h1>
+<p class="Pp">List the plugins that are installed but switched off:</p>
+<div class="Bd Pp Bd-indent Li">
+<pre>$ skyplug list | grep '^\[ \]'</pre>
+</div>
+<p class="Pp">Enable a plugin by name, ignoring case and extension:</p>
+<div class="Bd Pp Bd-indent Li">
+<pre>$ skyplug enable &quot;paarthurnax dilemma&quot;
+enabled Paarthurnax Dilemma.esp</pre>
+</div>
+<p class="Pp">Before loading an old save, find which of its mods are missing or
+    disabled:</p>
+<div class="Bd Pp Bd-indent Li">
+<pre>$ skyplug characters
+$ skyplug saves tessta
+$ skyplug save-plugins Quicksave0 | grep -v '\[x\]'</pre>
+</div>
+<p class="Pp">Use Skyrim VR, or an install the Steam search does not find:</p>
+<div class="Bd Pp Bd-indent Li">
+<pre>$ skyplug --appid 611670 list
+$ skyplug --game-dir &quot;/mnt/games/Skyrim Special Edition&quot; paths</pre>
+</div>
+<p class="Pp">Install this page after &#x2018;<code class="Li">cargo install
+    skyplug</code>&#x2019;, or read it without installing:</p>
+<div class="Bd Pp Bd-indent Li">
+<pre>$ skyplug man --install
+$ skyplug man | man -l -</pre>
+</div>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="SEE_ALSO"><a class="permalink" href="#SEE_ALSO">SEE
+  ALSO</a></h1>
+<p class="Pp"><a class="Xr" href="https://man7.org/linux/man-pages/man1/man.1.html">man(1)</a></p>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="AUTHORS"><a class="permalink" href="#AUTHORS">AUTHORS</a></h1>
+<p class="Pp"><span class="An">Divan Visagie</span>
+    &lt;<a class="Mt" href="mailto:me@divanv.com">me@divanv.com</a>&gt;</p>
+</section>
+</div>
+<table class="foot">
+  <tr>
+    <td class="foot-date">October 4, 2026</td>
+    <td class="foot-os">Ubuntu</td>
+  </tr>
+</table>
+</body>
+</html>

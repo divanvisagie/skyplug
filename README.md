@@ -136,6 +136,11 @@ that automatically for anything in `~/.cargo/bin` on your `PATH`, so
 [`crates/skyplug/man/skyplug.1`](crates/skyplug/man/skyplug.1), written by
 hand in mdoc; a test checks it mentions every subcommand and flag.
 
+[`docs/index.html`](docs/index.html) is the same page rendered to HTML
+for the web; regenerate it with `make docs` (needs
+[mandoc](https://mandoc.bsd.lv)) after editing the man page, and commit
+the result.
+
 ## Library (`skyplug-core`)
 
 The install discovery, `Plugins.txt` handling and save parsing live in a

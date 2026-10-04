@@ -1,5 +1,6 @@
 mod tui;
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -53,7 +54,16 @@ enum Command {
     /// List the plugins that were active in a specific save (exact
     /// filename, filename without `.ess`, or a substring).
     SavePlugins { save: String },
+    /// Print the skyplug(1) manual page.
+    Man {
+        /// Write it under ../share/man/man1 next to the skyplug binary
+        /// (e.g. ~/.cargo/share/man/man1 after `cargo install`) instead.
+        #[arg(long)]
+        install: bool,
+    },
 }
+
+const MAN_PAGE: &str = include_str!("../man/skyplug.1");
 
 fn resolve(cli: &Cli) -> Result<GamePaths> {
     let install = match &cli.game_dir {
@@ -232,8 +242,31 @@ fn cmd_save_plugins(resolved: &GamePaths, save: &str) -> Result<()> {
     Ok(())
 }
 
+fn cmd_man(install: bool) -> Result<()> {
+    if !install {
+        std::io::stdout().write_all(MAN_PAGE.as_bytes())?;
+        return Ok(());
+    }
+
+    let exe = std::env::current_exe().context("locating the skyplug binary")?;
+    let prefix = exe
+        .parent()
+        .and_then(|bin| bin.parent())
+        .context("the skyplug binary has no parent directory to install under")?;
+    let dir = prefix.join("share/man/man1");
+    let path = dir.join("skyplug.1");
+    std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(&path, MAN_PAGE))
+        .with_context(|| format!("writing {} (run `skyplug man > <path>` to put it somewhere else)", path.display()))?;
+    println!("installed {}", path.display());
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::Man { install } = cli.command {
+        return cmd_man(install);
+    }
     let resolved = resolve(&cli)?;
 
     match &cli.command {
@@ -245,5 +278,36 @@ fn main() -> Result<()> {
         Command::Characters => cmd_characters(&resolved),
         Command::Saves { character } => cmd_saves(&resolved, character),
         Command::SavePlugins { save } => cmd_save_plugins(&resolved, save),
+        Command::Man { .. } => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// The man page is written by hand, so make sure it keeps up with the
+    /// CLI: every subcommand and long flag needs at least a mention.
+    #[test]
+    fn man_page_covers_cli() {
+        fn check(cmd: &clap::Command, missing: &mut Vec<String>) {
+            for arg in cmd.get_arguments() {
+                // mdoc writes `--flag` as `Fl -flag`.
+                if let Some(long) = arg.get_long().filter(|long| !MAN_PAGE.contains(&format!("Fl -{long}"))) {
+                    missing.push(format!("--{long}"));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                if sub.get_name() != "help" && !MAN_PAGE.contains(&format!("Cm {}", sub.get_name())) {
+                    missing.push(sub.get_name().to_string());
+                }
+                check(sub, missing);
+            }
+        }
+
+        let mut missing = Vec::new();
+        check(&Cli::command(), &mut missing);
+        assert!(missing.is_empty(), "not documented in man/skyplug.1: {}", missing.join(", "));
     }
 }

@@ -30,6 +30,9 @@ skyplug paths             # print the resolved Data/Plugins.txt/Skyrim.ccc/Saves
 skyplug characters                # list every character across all saves
 skyplug saves <character>         # list a character's saves (name or substring)
 skyplug save-plugins <save>       # list the plugins active in a specific save
+
+skyplug man                       # print the skyplug(1) man page
+skyplug man --install             # install it next to the binary (see below)
 ```
 
 ### `edit` (TUI)
@@ -124,6 +127,14 @@ reported as an error rather than silently skipped.
 ```sh
 cargo build --release   # binary at target/release/skyplug
 ```
+
+`cargo install` only installs the binary, so the man page is built into it
+instead. `skyplug man --install` writes it to `../share/man/man1/` relative
+to the binary, i.e. `~/.cargo/share/man/man1/skyplug.1`; man-db searches
+that automatically for anything in `~/.cargo/bin` on your `PATH`, so
+`man skyplug` works with no `MANPATH` changes. The page's source is
+[`crates/skyplug/man/skyplug.1`](crates/skyplug/man/skyplug.1), written by
+hand in mdoc; a test checks it mentions every subcommand and flag.
 
 ## Library (`skyplug-core`)
 

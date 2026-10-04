@@ -1,0 +1,303 @@
+.Dd October 4, 2026
+.Dt SKYPLUG 1
+.Os
+.Sh NAME
+.Nm skyplug
+.Nd inspect and toggle Skyrim Special Edition plugins on Linux/Steam
+.Sh SYNOPSIS
+.Nm
+.Op Fl -game-dir Ar dir
+.Op Fl -appid Ar appid
+.Ar command
+.Op Ar args
+.Sh DESCRIPTION
+.Nm
+reads and edits the
+.Pa Plugins.txt
+load order of a Skyrim Special Edition install running under Proton,
+without a mod manager.
+It scans the game's
+.Pa Data
+directory for
+.Pa .esp ,
+.Pa .esm
+and
+.Pa .esl
+files, cross-references them with
+.Pa Plugins.txt
+and
+.Pa Skyrim.ccc ,
+and reports what the engine will actually load.
+.Pp
+It can also read
+.Pa .ess
+save files directly, to show which characters exist, which saves belong
+to each, and which plugins were active when a save was made.
+.Ss What loads
+Only two kinds of plugin load regardless of
+.Pa Plugins.txt :
+.Bl -bullet -width Ds
+.It
+the base game and DLC masters:
+.Pa Skyrim.esm ,
+.Pa Update.esm ,
+.Pa Dawnguard.esm ,
+.Pa HearthFires.esm
+and
+.Pa Dragonborn.esm ;
+.It
+Creation Club content listed in
+.Pa Skyrim.ccc .
+.El
+.Pp
+Every other plugin, including mod
+.Pa .esm
+files and
+.Pa .esp
+files carrying the master flag, loads only when it is prefixed with
+.Ql *
+in
+.Pa Plugins.txt .
+The master flag in a plugin's header only affects where it loads:
+masters load ahead of regular plugins.
+.Pp
+The load order
+.Nm
+shows is an approximation: base game masters in their fixed order, then
+Creation Club content in
+.Pa Skyrim.ccc
+order, then active masters, then active regular plugins, each group in
+.Pa Plugins.txt
+order.
+The engine additionally sorts masters by their dependencies, which
+.Nm
+does not parse.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm list
+List every plugin in
+.Pa Data ,
+plus any listed in
+.Pa Plugins.txt
+that no longer exist, each with a status marker:
+.Pp
+.Bl -tag -width "[CC]" -compact
+.It Li [x]
+enabled in
+.Pa Plugins.txt
+.It Li [\ ]
+present in
+.Pa Data
+but not enabled
+.It Li [!]
+listed in
+.Pa Plugins.txt
+but missing from
+.Pa Data
+.It Li [M]
+base game/DLC master, always loaded
+.It Li [CC]
+Creation Club content, always loaded
+.El
+.It Cm enable Ar plugin
+Enable
+.Ar plugin
+by setting its
+.Ql *
+prefix in
+.Pa Plugins.txt ,
+adding it to the end of the file if it is not listed yet.
+.It Cm disable Ar plugin
+Disable
+.Ar plugin
+by removing its
+.Ql *
+prefix.
+A plugin not listed in
+.Pa Plugins.txt
+is left alone.
+.It Cm edit
+Open the interactive editor; see
+.Sx EDITOR .
+.It Cm paths
+Print the resolved
+.Pa Data ,
+.Pa Plugins.txt ,
+.Pa Skyrim.ccc
+and saves paths, then exit.
+Useful for checking that auto-detection found the right install.
+.It Cm characters
+List every character across all saves, with the number of saves each has
+and details of the most recent one.
+.It Cm saves Ar character
+List every save belonging to
+.Ar character .
+.It Cm save-plugins Ar save
+List the plugins that were active when
+.Ar save
+was made, each marked against the current setup with the same markers as
+.Cm list .
+.It Cm man Op Fl -install
+Print this manual page to standard output.
+With
+.Fl -install ,
+write it to
+.Pa ../share/man/man1/skyplug.1
+relative to the directory holding the
+.Nm
+binary instead, and print the path written.
+.El
+.Pp
+.Ar plugin
+may be the exact filename, the filename in a different case, or the name
+without its extension.
+.Ar character
+matches a player name exactly or by case-insensitive substring.
+.Ar save
+matches a save's filename with or without
+.Pa .ess ,
+or an unambiguous substring of it.
+An ambiguous match fails and lists the candidates.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -game-dir Ar dir
+Use the Skyrim Special Edition install in
+.Ar dir
+(the directory containing
+.Pa SkyrimSE.exe )
+instead of searching the Steam libraries.
+The Proton prefix is looked up in the Steam library that contains
+.Ar dir .
+.It Fl -appid Ar appid
+Steam AppID used to locate the game and its Proton prefix.
+Defaults to 489830, Skyrim Special Edition.
+.It Fl h , Fl -help
+Print a short usage summary.
+.It Fl V , Fl -version
+Print the version.
+.El
+.Sh EDITOR
+.Cm edit
+has two tabs,
+.Sy Plugins
+and
+.Sy Saves ,
+switched with
+.Ic tab .
+.Pp
+In both tabs:
+.Bl -tag -width "space, enter" -compact
+.It Ic j , k , Ic up , down
+move the selection
+.It Ic gg , G
+jump to the top or bottom
+.It Ic tab
+switch tab
+.It Ic s
+save plugin changes and quit
+.It Ic q , esc
+quit, asking again first if there are unsaved changes
+.El
+.Pp
+In the Plugins tab:
+.Bl -tag -width "space, enter" -compact
+.It Ic space , enter
+toggle the selected plugin
+.It Ic /
+filter by substring as you type;
+.Ic enter
+keeps the filter,
+.Ic esc
+restores the previous one
+.It Ic o
+cycle the sort order: load order, name, type, enabled
+.El
+.Pp
+Toggles are held in memory and marked with a trailing
+.Ql *
+until saved with
+.Ic s .
+Always-loaded and missing plugins cannot be toggled.
+.Pp
+In the Saves tab, which goes from characters to their saves to a save's
+plugins:
+.Bl -tag -width "space, enter" -compact
+.It Ic l , right , enter
+open the selected character or save
+.It Ic h , left , backspace
+go back up a level
+.It Ic esc
+go back up a level, or quit at the top
+.El
+.Pp
+A save's plugins are marked against the current setup, including unsaved
+toggles, so you can enable what a save needs in the Plugins tab and check
+it in the Saves tab before saving.
+.Sh FILES
+Paths are shown relative to the Steam library holding the game,
+.Ar lib ,
+and to the Proton user directory inside it,
+.Ar user ,
+which is
+.Pa lib/steamapps/compatdata/489830/pfx/drive_c/users/steamuser
+for the default AppID.
+.Cm paths
+prints the resolved ones.
+.Bl -tag -width Ds
+.It Pa lib/steamapps/common/Skyrim Special Edition/Data/
+Installed plugins.
+.It Pa lib/steamapps/common/Skyrim Special Edition/Skyrim.ccc
+Creation Club plugins the engine always loads.
+.It Pa user/AppData/Local/Skyrim Special Edition/Plugins.txt
+The load order.
+.Nm
+writes
+.Pa Plugins.txt.bak
+beside it before every change.
+.It Pa user/Documents/My Games/Skyrim Special Edition/Saves/
+Save files.
+.It Pa ~/.local/share/Steam , ~/.steam/steam , ~/.steam/root
+Steam installs searched for
+.Pa libraryfolders.vdf ,
+along with the Flatpak install under
+.Pa ~/.var/app/com.valvesoftware.Steam .
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+List the plugins that are installed but switched off:
+.Bd -literal -offset indent
+$ skyplug list | grep '^\e[ \e]'
+.Ed
+.Pp
+Enable a plugin by name, ignoring case and extension:
+.Bd -literal -offset indent
+$ skyplug enable "paarthurnax dilemma"
+enabled Paarthurnax Dilemma.esp
+.Ed
+.Pp
+Before loading an old save, find which of its mods are missing or
+disabled:
+.Bd -literal -offset indent
+$ skyplug characters
+$ skyplug saves tessta
+$ skyplug save-plugins Quicksave0 | grep -v '\e[x\e]'
+.Ed
+.Pp
+Use Skyrim VR, or an install the Steam search does not find:
+.Bd -literal -offset indent
+$ skyplug --appid 611670 list
+$ skyplug --game-dir "/mnt/games/Skyrim Special Edition" paths
+.Ed
+.Pp
+Install this page after
+.Ql cargo install skyplug ,
+or read it without installing:
+.Bd -literal -offset indent
+$ skyplug man --install
+$ skyplug man | man -l -
+.Ed
+.Sh SEE ALSO
+.Xr man 1
+.Sh AUTHORS
+.An Divan Visagie Aq Mt me@divanv.com

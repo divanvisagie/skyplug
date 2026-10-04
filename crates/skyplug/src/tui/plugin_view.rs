@@ -202,10 +202,8 @@ impl PluginsView {
             self.message = if row.status.state == State::Missing {
                 format!("{} is missing from Data, nothing to toggle", row.status.name)
             } else {
-                format!(
-                    "{} is a master/light-master plugin \u{2014} always loaded, toggling has no effect",
-                    row.status.name
-                )
+                let what = if row.status.is_cc { "Creation Club content" } else { "a base game/DLC master" };
+                format!("{} is {what} \u{2014} always loaded, toggling has no effect", row.status.name)
             };
             return;
         }

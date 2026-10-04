@@ -51,7 +51,7 @@ fn plugin_tag(plugins: &PluginsView, name: &str) -> (&'static str, &'static str,
     };
     let status = &row.status;
     if status.is_forced {
-        if status.is_cc { ("[CC]", "creation club", Color::Cyan) } else { ("[M]", "master, always loaded", Color::Cyan) }
+        if status.is_cc { ("[CC]", "creation club", Color::Cyan) } else { ("[M]", "base game master, always loaded", Color::Cyan) }
     } else if status.state == State::Missing {
         ("[!]", "in Plugins.txt but missing from Data", Color::Red)
     } else if row.effective_active() {

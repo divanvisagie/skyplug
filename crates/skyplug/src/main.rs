@@ -33,7 +33,7 @@ enum Command {
     ///   [x]  enabled
     ///   [ ]  disabled
     ///   [!]  missing from Data (listed in Plugins.txt but the file isn't there)
-    ///   [M]  master/light-master — the engine always loads it regardless of Plugins.txt
+    ///   [M]  base game/DLC master — the engine always loads it regardless of Plugins.txt
     ///   [CC] Creation Club content — always loaded via Skyrim.ccc regardless of Plugins.txt
     #[command(verbatim_doc_comment)]
     List,
@@ -95,7 +95,7 @@ fn cmd_list(resolved: &GamePaths) -> Result<()> {
     let missing = statuses.iter().filter(|s| s.state == State::Missing).count();
     let forced = statuses.iter().filter(|s| s.is_forced).count();
     println!(
-        "\n{} enabled, {} disabled, {} always-loaded (master/CC), {} missing ({} total)",
+        "\n{} enabled, {} disabled, {} always-loaded (base game/CC), {} missing ({} total)",
         enabled,
         disabled,
         forced,
@@ -106,20 +106,19 @@ fn cmd_list(resolved: &GamePaths) -> Result<()> {
     Ok(())
 }
 
-fn warn_if_forced(data_plugins: &[plugins::DataPlugin], exact: &str) {
-    if let Some(p) = data_plugins.iter().find(|p| p.name == exact) {
-        if p.is_forced {
-            eprintln!(
-                "note: {exact} is a master/light-master plugin — the engine always loads it regardless of Plugins.txt"
-            );
-        }
+fn warn_if_forced(resolved: &GamePaths, exact: &str) -> Result<()> {
+    let statuses = resolved.plugin_status()?;
+    if let Some(s) = statuses.iter().find(|s| s.name == exact && s.is_forced) {
+        let what = if s.is_cc { "Creation Club content (Skyrim.ccc)" } else { "a base game/DLC master" };
+        eprintln!("note: {exact} is {what} — the engine always loads it regardless of Plugins.txt");
     }
+    Ok(())
 }
 
 fn cmd_enable(resolved: &GamePaths, plugin: &str) -> Result<()> {
     let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
     let exact = plugins::resolve_plugin_name(plugin, &data_plugins)?.to_string();
-    warn_if_forced(&data_plugins, &exact);
+    warn_if_forced(resolved, &exact)?;
 
     match plugins::set_plugin_enabled(&resolved.plugins_txt, &exact, true)? {
         ChangeResult::AlreadyInState => println!("{exact} is already enabled"),
@@ -133,7 +132,7 @@ fn cmd_enable(resolved: &GamePaths, plugin: &str) -> Result<()> {
 fn cmd_disable(resolved: &GamePaths, plugin: &str) -> Result<()> {
     let data_plugins = plugins::scan_data_plugins(&resolved.data_dir)?;
     let exact = plugins::resolve_plugin_name(plugin, &data_plugins)?.to_string();
-    warn_if_forced(&data_plugins, &exact);
+    warn_if_forced(resolved, &exact)?;
 
     match plugins::set_plugin_enabled(&resolved.plugins_txt, &exact, false)? {
         ChangeResult::AlreadyInState => println!("{exact} is already disabled"),

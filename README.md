@@ -3,12 +3,15 @@
 Command-line tool for inspecting and toggling Skyrim Special Edition's
 `Plugins.txt` load order on Linux/Steam, without a mod manager.
 
-It scans the game's `Data` directory for `.esp`/`.esm`/`.esl` files, reads
-each plugin's header to see if it's a master (which the engine always
-loads, regardless of `Plugins.txt`; the light-master/ESL bit does *not*
-have this effect, a light-flagged plugin still needs to be active in
-`Plugins.txt`), cross-references `Plugins.txt` and `Skyrim.ccc`, and
-reports what's actually active.
+It scans the game's `Data` directory for `.esp`/`.esm`/`.esl` files,
+cross-references `Plugins.txt` and `Skyrim.ccc`, and reports what's
+actually active. Only the base game/DLC masters (`Skyrim.esm`,
+`Update.esm`, `Dawnguard.esm`, `HearthFires.esm`, `Dragonborn.esm`) and
+Creation Club content listed in `Skyrim.ccc` load regardless of
+`Plugins.txt`; every other plugin — including mod `.esm`s and
+master-flagged `.esp`s like USSEP — needs `*` there to load. The header's
+master flag is still read, but only to place masters ahead of regular
+plugins in the load order.
 
 It can also read `.ess` save files directly, to answer "which character is
 this," "what saves does this character have," and "which mods were
@@ -47,8 +50,8 @@ Plugins tab:
 - `o` — cycle sort: load order, name, type, enabled
 
 Changes are only written to `Plugins.txt` on `s`; toggles made while browsing
-are kept in memory until then, shown with a trailing `*`. Master/light-master
-and missing plugins can't be toggled (toggling them would have no effect, or
+are kept in memory until then, shown with a trailing `*`. Base game/DLC masters,
+Creation Club content, and missing plugins can't be toggled (toggling them would have no effect, or
 nothing to toggle) — selecting them shows why in the status bar instead.
 
 Saves tab — drill down from characters, to a character's saves, to the
@@ -72,7 +75,7 @@ without its extension (e.g. `skyplug enable "paarthurnax dilemma"` matches
 ```
 [x] SomeMod.esp     enabled via Plugins.txt
 [ ] OtherMod.esp     present in Data but not active
-[M] Skyrim.esm       master — always loaded, Plugins.txt is irrelevant
+[M] Skyrim.esm       base game/DLC master — always loaded, Plugins.txt is irrelevant
 [CC] ccBGSSSE001-Fish.esm   Creation Club content — always loaded
 [!] Missing.esp      listed in Plugins.txt but no longer in Data
 ```

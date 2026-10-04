@@ -9,6 +9,14 @@ const PLUGIN_EXTENSIONS: [&str; 3] = ["esp", "esm", "esl"];
 // TES4 header record flags (see the Creation Kit wiki's "Data File Format" page).
 const RECORD_FLAG_MASTER: u32 = 0x0000_0001;
 
+/// The base game and its DLC: the only plugins outside Skyrim.ccc that the
+/// engine loads regardless of Plugins.txt, always in this order.
+const NATIVE_MASTERS: [&str; 5] = ["Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"];
+
+fn native_master_pos(name: &str) -> Option<usize> {
+    NATIVE_MASTERS.iter().position(|n| eq_ci(n, name))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Enabled,
@@ -23,11 +31,14 @@ pub struct PluginStatus {
     pub state: State,
     /// Creation Club content: auto-loaded via Skyrim.ccc regardless of Plugins.txt.
     pub is_cc: bool,
-    /// Master flagged: the engine force-loads these regardless of
-    /// Plugins.txt, so `*` there is irrelevant to them. The light-master
-    /// (ESL) bit does NOT imply this — light-flagged plugins still need
-    /// `*` in Plugins.txt to load, same as an ordinary .esp.
+    /// Loaded by the engine regardless of Plugins.txt: the base game/DLC
+    /// masters (`NATIVE_MASTERS`) and Creation Club content in Skyrim.ccc.
+    /// Nothing else is — a master-flagged mod (.esm, or an .esp with the
+    /// master bit) still needs `*` in Plugins.txt like any other plugin.
     pub is_forced: bool,
+    /// The TES4 header's master bit is set. Only affects load order (masters
+    /// load before regular plugins), not whether the plugin loads.
+    pub is_master: bool,
     /// 1-based position in the approximate engine load order, or `None` if
     /// the plugin doesn't actually load (disabled or missing). See
     /// `build_status` for how this is derived.
@@ -37,14 +48,14 @@ pub struct PluginStatus {
 #[derive(Debug, Clone)]
 pub struct DataPlugin {
     pub name: String,
-    pub is_forced: bool,
+    pub is_master: bool,
 }
 
 /// Read the TES4 header's record flags and report whether the master bit
-/// is set. Any read/parse failure is treated as "not forced" rather than
+/// is set. Any read/parse failure is treated as "not a master" rather than
 /// an error, since a handful of unreadable/odd files shouldn't stop the
 /// whole scan.
-fn read_forced_flag(path: &Path) -> bool {
+fn read_master_flag(path: &Path) -> bool {
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
     };
@@ -61,7 +72,7 @@ fn read_forced_flag(path: &Path) -> bool {
 
 /// List every `.esp`/`.esm`/`.esl` file directly inside `Data`, exact case
 /// as it exists on disk, along with whether its header marks it as a
-/// master (force-loaded by the engine).
+/// master.
 pub fn scan_data_plugins(data_dir: &Path) -> Result<Vec<DataPlugin>> {
     let mut plugins = Vec::new();
     let entries = std::fs::read_dir(data_dir)
@@ -77,7 +88,7 @@ pub fn scan_data_plugins(data_dir: &Path) -> Result<Vec<DataPlugin>> {
         let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
         if PLUGIN_EXTENSIONS.contains(&ext.as_str()) {
             let path: PathBuf = data_dir.join(&name);
-            plugins.push(DataPlugin { name, is_forced: read_forced_flag(&path) });
+            plugins.push(DataPlugin { name, is_master: read_master_flag(&path) });
         }
     }
 
@@ -147,8 +158,9 @@ pub fn build_status(
             continue;
         }
         let is_cc = ccc.iter().any(|c| eq_ci(c, &plugin.name));
+        let is_forced = is_cc || native_master_pos(&plugin.name).is_some();
         let txt_entry = plugins_txt.iter().find(|e| eq_ci(&e.name, &plugin.name));
-        let state = if plugin.is_forced {
+        let state = if is_forced {
             State::Enabled
         } else if let Some(entry) = txt_entry {
             if entry.active { State::Enabled } else { State::Disabled }
@@ -159,7 +171,8 @@ pub fn build_status(
             name: plugin.name.clone(),
             state,
             is_cc,
-            is_forced: plugin.is_forced,
+            is_forced,
+            is_master: plugin.is_master,
             load_order: None,
         });
     }
@@ -173,6 +186,7 @@ pub fn build_status(
                 state: State::Missing,
                 is_cc: false,
                 is_forced: false,
+                is_master: false,
                 load_order: None,
             });
         }
@@ -187,10 +201,10 @@ pub fn build_status(
 /// Approximate the engine's load order and stamp each loadable plugin's
 /// `load_order` with its 1-based position in it.
 ///
-/// The engine actually loads: Creation Club content (Skyrim.ccc order),
-/// then master/light-master plugins, then regular plugins — with masters
-/// additionally reordered among themselves by their master-file
-/// dependencies. We don't parse each plugin's master list, so within a
+/// The engine actually loads: the base game/DLC masters (fixed order), then
+/// Creation Club content (Skyrim.ccc order), then active master-flagged
+/// plugins, then regular plugins — with masters additionally reordered
+/// among themselves by their master-file dependencies. We don't parse each plugin's master list, so within a
 /// group this just uses the order it's listed in Plugins.txt/Skyrim.ccc,
 /// which is right often enough to be useful but isn't a guarantee.
 /// Disabled and missing plugins don't load at all, so they're left `None`.
@@ -199,17 +213,19 @@ fn assign_load_order(statuses: &mut [PluginStatus], plugins_txt: &[PluginsTxtEnt
     let ccc_pos = |name: &str| ccc.iter().position(|c| eq_ci(c, name));
 
     let mut loadable: Vec<usize> = (0..statuses.len())
-        .filter(|&i| statuses[i].is_cc || statuses[i].is_forced || statuses[i].state == State::Enabled)
+        .filter(|&i| statuses[i].is_forced || statuses[i].state == State::Enabled)
         .collect();
 
     loadable.sort_by_key(|&i| {
         let s = &statuses[i];
-        if s.is_cc {
-            (0u8, ccc_pos(&s.name).unwrap_or(usize::MAX))
-        } else if s.is_forced {
-            (1u8, txt_pos(&s.name).unwrap_or(usize::MAX))
-        } else {
+        if let Some(pos) = native_master_pos(&s.name) {
+            (0u8, pos)
+        } else if s.is_cc {
+            (1u8, ccc_pos(&s.name).unwrap_or(usize::MAX))
+        } else if s.is_master {
             (2u8, txt_pos(&s.name).unwrap_or(usize::MAX))
+        } else {
+            (3u8, txt_pos(&s.name).unwrap_or(usize::MAX))
         }
     });
 
@@ -355,8 +371,8 @@ pub fn apply_changes(path: &Path, changes: &[(String, bool)]) -> Result<usize> {
 mod tests {
     use super::*;
 
-    fn data(name: &str, is_forced: bool) -> DataPlugin {
-        DataPlugin { name: name.to_string(), is_forced }
+    fn data(name: &str, is_master: bool) -> DataPlugin {
+        DataPlugin { name: name.to_string(), is_master }
     }
 
     fn txt(name: &str, active: bool) -> PluginsTxtEntry {
@@ -376,11 +392,38 @@ mod tests {
         assert_eq!(get("B.esp").state, State::Enabled);
         assert_eq!(get("Gone.esp").state, State::Missing);
         assert!(get("ccFish.esm").is_cc);
-        // CC first, then masters, then regular plugins in Plugins.txt order.
-        assert_eq!(get("ccFish.esm").load_order, Some(1));
-        assert_eq!(get("Skyrim.esm").load_order, Some(2));
+        // Base game first, then CC, then regular plugins in Plugins.txt order.
+        assert_eq!(get("Skyrim.esm").load_order, Some(1));
+        assert_eq!(get("ccFish.esm").load_order, Some(2));
         assert_eq!(get("B.esp").load_order, Some(3));
         assert_eq!(get("A.esp").load_order, None);
+    }
+
+    #[test]
+    fn mod_masters_need_plugins_txt() {
+        let data_plugins = [
+            data("Dragonborn.esm", true),
+            data("Skyrim.esm", true),
+            data("ApachiiHair.esm", true),
+            data("Unofficial Patch.esp", true),
+            data("Mod.esp", false),
+        ];
+        let plugins_txt = [txt("Mod.esp", true), txt("Unofficial Patch.esp", true)];
+
+        let statuses = build_status(&data_plugins, &plugins_txt, &[]);
+        let get = |n: &str| statuses.iter().find(|s| s.name == n).unwrap();
+
+        assert!(get("Skyrim.esm").is_forced);
+        assert!(!get("ApachiiHair.esm").is_forced);
+        assert_eq!(get("ApachiiHair.esm").state, State::Disabled);
+        assert_eq!(get("ApachiiHair.esm").load_order, None);
+        assert_eq!(get("Unofficial Patch.esp").state, State::Enabled);
+        // Native masters in their fixed order, then active masters ahead of
+        // regular plugins even when Plugins.txt lists them later.
+        assert_eq!(get("Skyrim.esm").load_order, Some(1));
+        assert_eq!(get("Dragonborn.esm").load_order, Some(2));
+        assert_eq!(get("Unofficial Patch.esp").load_order, Some(3));
+        assert_eq!(get("Mod.esp").load_order, Some(4));
     }
 
     #[test]

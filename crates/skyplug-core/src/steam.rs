@@ -20,14 +20,18 @@ impl GameInstall {
     /// Build an install from an explicit game directory, deriving the
     /// library root from the standard `<library>/steamapps/common/<game>`
     /// layout so the matching compatdata prefix can still be found.
+    ///
+    /// On Windows the per-user files don't live under the library, so any
+    /// game directory is accepted (a GOG install, say); the library root
+    /// then falls back to the game directory itself.
     pub fn from_game_dir(game_dir: impl Into<PathBuf>) -> Result<Self> {
         let game_dir = game_dir.into();
-        let library_root = game_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .context("game directory doesn't look like a Steam steamapps/common install")?
-            .to_path_buf();
+        let library_root = game_dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent());
+        let library_root = match library_root {
+            Some(root) => root.to_path_buf(),
+            None if cfg!(windows) => game_dir.clone(),
+            None => bail!("game directory doesn't look like a Steam steamapps/common install"),
+        };
         Ok(GameInstall { game_dir, library_root })
     }
 
@@ -43,26 +47,77 @@ impl GameInstall {
         self.library_root.join("steamapps").join("compatdata").join(appid)
     }
 
-    /// Path to Plugins.txt inside the Proton prefix for this install.
+    /// Path to Plugins.txt: in the Proton prefix for this install on Linux,
+    /// in the user's `AppData\Local` on Windows.
     pub fn plugins_txt_path(&self, appid: &str) -> PathBuf {
-        self.compatdata_dir(appid)
-            .join("pfx/drive_c/users/steamuser/AppData/Local")
-            .join(DEFAULT_GAME_FOLDER)
-            .join("Plugins.txt")
+        self.user_folders(appid, &Layout::current()).plugins_txt()
     }
 
-    /// The `My Games/Skyrim Special Edition` documents folder inside the
-    /// Proton prefix (holds `Saves`, `SkyrimPrefs.ini`, ...).
+    /// The `My Games/Skyrim Special Edition` documents folder (holds
+    /// `Saves`, `SkyrimPrefs.ini`, ...): in the Proton prefix on Linux, in
+    /// the user's Documents on Windows.
     pub fn documents_dir(&self, appid: &str) -> PathBuf {
-        self.compatdata_dir(appid)
-            .join("pfx/drive_c/users/steamuser/Documents/My Games")
-            .join(DEFAULT_GAME_FOLDER)
+        self.user_folders(appid, &Layout::current()).documents_dir()
     }
 
-    /// Path to the `Saves` folder (`.ess` files) inside the Proton prefix
-    /// for this install.
+    /// Path to the `Saves` folder (`.ess` files); see [`Self::documents_dir`].
     pub fn saves_dir(&self, appid: &str) -> PathBuf {
         self.documents_dir(appid).join("Saves")
+    }
+
+    fn user_folders(&self, appid: &str, layout: &Layout) -> UserFolders {
+        match layout {
+            Layout::Proton => {
+                let user = self.compatdata_dir(appid).join("pfx/drive_c/users/steamuser");
+                UserFolders { local_app_data: user.join("AppData/Local"), documents: user.join("Documents") }
+            }
+            Layout::Native { local_app_data, documents } => {
+                UserFolders { local_app_data: local_app_data.clone(), documents: documents.clone() }
+            }
+        }
+    }
+}
+
+/// Where the game keeps per-user files: Plugins.txt under `AppData\Local`,
+/// saves and settings under `Documents\My Games`.
+#[derive(Debug, Clone)]
+pub enum Layout {
+    /// Steam Play on Linux: the Windows user folders inside the install's
+    /// Proton prefix.
+    Proton,
+    /// Windows itself: the signed-in user's own folders.
+    Native { local_app_data: PathBuf, documents: PathBuf },
+}
+
+impl Layout {
+    /// Native on Windows, Proton everywhere else. On Windows the folders
+    /// come from the shell's known folders, so a Documents folder moved to
+    /// OneDrive is still found.
+    pub fn current() -> Self {
+        if cfg!(windows) {
+            let home = home_dir().unwrap_or_default();
+            Layout::Native {
+                local_app_data: dirs::data_local_dir().unwrap_or_else(|| home.join("AppData/Local")),
+                documents: dirs::document_dir().unwrap_or_else(|| home.join("Documents")),
+            }
+        } else {
+            Layout::Proton
+        }
+    }
+}
+
+struct UserFolders {
+    local_app_data: PathBuf,
+    documents: PathBuf,
+}
+
+impl UserFolders {
+    fn plugins_txt(&self) -> PathBuf {
+        self.local_app_data.join(DEFAULT_GAME_FOLDER).join("Plugins.txt")
+    }
+
+    fn documents_dir(&self) -> PathBuf {
+        self.documents.join("My Games").join(DEFAULT_GAME_FOLDER)
     }
 }
 
@@ -268,6 +323,24 @@ mod tests {
         assert_eq!(libs[0].apps, vec!["228980"]);
         assert_eq!(libs[1].path, PathBuf::from("/mnt/games/SteamLibrary"));
         assert_eq!(libs[1].apps, vec!["489830", "611670"]);
+    }
+
+    #[test]
+    fn user_files_live_in_the_proton_prefix_or_the_windows_user_folders() {
+        let install = GameInstall::from_game_dir("/mnt/lib/steamapps/common/Skyrim Special Edition").unwrap();
+
+        let proton = install.user_folders("489830", &Layout::Proton);
+        let prefix = PathBuf::from("/mnt/lib/steamapps/compatdata/489830/pfx/drive_c/users/steamuser");
+        assert_eq!(proton.plugins_txt(), prefix.join("AppData/Local/Skyrim Special Edition/Plugins.txt"));
+        assert_eq!(proton.documents_dir(), prefix.join("Documents/My Games/Skyrim Special Edition"));
+
+        let native = Layout::Native {
+            local_app_data: PathBuf::from("C:/Users/me/AppData/Local"),
+            documents: PathBuf::from("C:/Users/me/OneDrive/Documents"),
+        };
+        let native = install.user_folders("489830", &native);
+        assert_eq!(native.plugins_txt(), PathBuf::from("C:/Users/me/AppData/Local/Skyrim Special Edition/Plugins.txt"));
+        assert_eq!(native.documents_dir(), PathBuf::from("C:/Users/me/OneDrive/Documents/My Games/Skyrim Special Edition"));
     }
 
     #[test]

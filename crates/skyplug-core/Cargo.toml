@@ -10,3 +10,4 @@ description = "Skyrim Special Edition install discovery, Plugins.txt and .ess sa
 [dependencies]
 anyhow = "1"
 lz4_flex = "0.11"
+dirs = "7"

@@ -1,8 +1,9 @@
 # skyplug-core
 
-Library for working with a Skyrim Special Edition install on Linux/Steam
-(Proton): finding the game, reading and changing which plugins are active,
-and parsing `.ess` save files. It's the shared core of the
+Library for working with a Skyrim Special Edition install on Steam, under
+Proton on Linux or on Windows itself: finding the game, reading and
+changing which plugins are active, and parsing `.ess` save files. It's the
+shared core of the
 [`skyplug`](https://github.com/divanvisagie/skyplug) command-line tool,
 split out so other tools don't have to re-implement the same file formats.
 
@@ -15,7 +16,9 @@ decides how to present them.
   actually *owns* the AppID in `libraryfolders.vdf`, rather than probing
   for a folder that might be a stale leftover. Exposes the VDF parser,
   the candidate Steam roots (native, Flatpak, Windows default), and the
-  Proton-prefix paths for `Plugins.txt`, `Saves` and `My Games`.
+  paths for `Plugins.txt`, `Saves` and `My Games`: inside the Proton prefix
+  on Linux, in the user's own `AppData\Local` and Documents on Windows
+  (see `Layout`).
 - **`plugins`** — scans `Data` for `.esp`/`.esm`/`.esl` files and reads
   each header's master flag, parses `Plugins.txt` and `Skyrim.ccc`, merges
   them into a per-plugin status with an approximate load order, and
@@ -73,9 +76,9 @@ instead of `detect`.
 
 - **Errors are `anyhow::Error`**, carrying context about which file
   failed. There's no typed error enum to match on yet.
-- **Paths assume Proton.** Steam roots include the Windows default, but
-  `Plugins.txt`, `Saves` and `My Games` are resolved inside the Proton
-  prefix, not the native Windows locations.
+- **Windows finds Steam at its default location.** Steam roots include
+  `C:\Program Files (x86)\Steam`; a Steam installed elsewhere isn't read
+  from the registry yet. `GameInstall::from_game_dir` covers it.
 - **Load order is approximate.** Creation Club, then masters, then regular
   plugins, each group in `Plugins.txt`/`Skyrim.ccc` order. Plugins' own
   master lists aren't read, so dependency reordering among masters isn't

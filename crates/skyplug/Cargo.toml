@@ -8,7 +8,7 @@ readme = "../../README.md"
 description = "Scan and toggle Skyrim Special Edition plugins (Plugins.txt) on Linux, Steam or GOG"
 
 [dependencies]
-skyplug-core = { path = "../skyplug-core", version = "0.1.1" }
+skyplug-core = { path = "../skyplug-core", version = "0.2.0" }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 ratatui = "0.30.2"

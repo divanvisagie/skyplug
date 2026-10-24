@@ -1,12 +1,13 @@
-.Dd October 4, 2026
+.Dd October 24, 2026
 .Dt SKYPLUG 1
 .Os
 .Sh NAME
 .Nm skyplug
-.Nd inspect and toggle Skyrim Special Edition plugins on Linux/Steam
+.Nd inspect and toggle Skyrim Special Edition plugins on Linux
 .Sh SYNOPSIS
 .Nm
 .Op Fl -game-dir Ar dir
+.Op Fl -prefix Ar dir
 .Op Fl -appid Ar appid
 .Ar command
 .Op Ar args
@@ -14,8 +15,8 @@
 .Nm
 reads and edits the
 .Pa Plugins.txt
-load order of a Skyrim Special Edition install running under Proton,
-without a mod manager.
+load order of a Skyrim Special Edition install running under Proton or
+Wine, Steam's or GOG's, without a mod manager.
 It scans the game's
 .Pa Data
 directory for
@@ -167,7 +168,25 @@ Use the Skyrim Special Edition install in
 .Pa SkyrimSE.exe )
 instead of searching the Steam libraries.
 The Proton prefix is looked up in the Steam library that contains
-.Ar dir .
+.Ar dir ;
+for a game outside a Steam library, give its prefix with
+.Fl -prefix .
+A directory holding a
+.Pa goggame-*.info
+file is GOG's build, whose per-user folders are named
+.Pa Skyrim Special Edition GOG .
+.It Fl -prefix Ar dir
+Read
+.Pa Plugins.txt
+and the saves from the Wine prefix
+.Ar dir
+(the directory holding
+.Pa drive_c )
+instead of the Steam library's Proton prefix, as for GOG's build run
+under umu or Wine.
+The Windows user inside it is
+.Ql steamuser
+when that exists, as under Proton and umu, else the Unix user.
 .It Fl -appid Ar appid
 Steam AppID used to locate the game and its Proton prefix.
 Defaults to 489830, Skyrim Special Edition.
@@ -175,6 +194,17 @@ Defaults to 489830, Skyrim Special Edition.
 Print a short usage summary.
 .It Fl V , Fl -version
 Print the version.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev SKYPLUG_GAME_DIR
+Used for
+.Fl -game-dir
+when it isn't given.
+.It Ev SKYPLUG_PREFIX
+Used for
+.Fl -prefix
+when it isn't given.
 .El
 .Sh EDITOR
 .Cm edit
@@ -241,6 +271,12 @@ and to the Proton user directory inside it,
 which is
 .Pa lib/steamapps/compatdata/489830/pfx/drive_c/users/steamuser
 for the default AppID.
+With
+.Fl -prefix ,
+.Ar user
+is the user directory in that prefix instead, and for GOG's build the
+per-user folders are named
+.Pa Skyrim Special Edition GOG .
 .Cm paths
 prints the resolved ones.
 .Bl -tag -width Ds
@@ -288,6 +324,13 @@ Use Skyrim VR, or an install the Steam search does not find:
 .Bd -literal -offset indent
 $ skyplug --appid 611670 list
 $ skyplug --game-dir "/mnt/games/Skyrim Special Edition" paths
+.Ed
+.Pp
+Use GOG's build, run under umu with its own prefix:
+.Bd -literal -offset indent
+$ export SKYPLUG_GAME_DIR="/games/gog/Skyrim Special Edition"
+$ export SKYPLUG_PREFIX=/games/gog/prefixes/skyrim-se
+$ skyplug list
 .Ed
 .Pp
 Install this page after

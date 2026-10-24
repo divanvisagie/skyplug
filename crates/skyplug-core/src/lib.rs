@@ -8,7 +8,7 @@ pub mod plugins;
 pub mod saves;
 pub mod steam;
 
-pub use steam::{DEFAULT_APPID, GameInstall};
+pub use steam::{DEFAULT_APPID, Edition, GameInstall};
 
 /// Every on-disk location the rest of the crate needs, resolved once from
 /// a [`GameInstall`].
@@ -18,6 +18,10 @@ pub struct GamePaths {
     pub plugins_txt: PathBuf,
     pub ccc_path: PathBuf,
     pub saves_dir: PathBuf,
+    pub edition: Edition,
+    /// The Wine prefix the user files are in; `None` on Windows, where
+    /// they're in the user's own folders.
+    pub prefix: Option<PathBuf>,
 }
 
 impl GamePaths {
@@ -27,6 +31,8 @@ impl GamePaths {
             plugins_txt: install.plugins_txt_path(appid),
             ccc_path: install.ccc_path(),
             saves_dir: install.saves_dir(appid),
+            edition: install.edition,
+            prefix: install.wine_prefix(appid),
         }
     }
 

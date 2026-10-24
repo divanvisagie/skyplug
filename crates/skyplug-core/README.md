@@ -1,7 +1,7 @@
 # skyplug-core
 
-Library for working with a Skyrim Special Edition install on Steam, under
-Proton on Linux or on Windows itself: finding the game, reading and
+Library for working with a Skyrim Special Edition install, Steam's or
+GOG's, under Proton or Wine on Linux or on Windows itself: finding the game, reading and
 changing which plugins are active, and parsing `.ess` save files. It's the
 shared core of the
 [`skyplug`](https://github.com/divanvisagie/skyplug) command-line tool,
@@ -18,7 +18,9 @@ decides how to present them.
   the candidate Steam roots (native, Flatpak, Windows default), and the
   paths for `Plugins.txt`, `Saves` and `My Games`: inside the Proton prefix
   on Linux, in the user's own `AppData\Local` and Documents on Windows
-  (see `Layout`).
+  (see `Layout`). A copy outside Steam can bring its own Wine prefix, and
+  `Edition` tells Steam's build from GOG's, whose per-user folders are
+  named `Skyrim Special Edition GOG`.
 - **`plugins`** — scans `Data` for `.esp`/`.esm`/`.esl` files and reads
   each header's master flag, parses `Plugins.txt` and `Skyrim.ccc`, merges
   them into a per-plugin status with an approximate load order, and
@@ -70,7 +72,10 @@ fn main() -> anyhow::Result<()> {
 
 For a game directory you already know, build the paths with
 `GameInstall::from_game_dir(dir)` and `GamePaths::new(&install, appid)`
-instead of `detect`.
+instead of `detect`. For one outside Steam on Linux, like GOG's under umu,
+pass the Wine prefix it runs in (the folder holding `drive_c`):
+`GameInstall::new(dir, Some(prefix))`. The edition is detected from the
+game directory either way.
 
 ## Caveats
 

@@ -3,7 +3,8 @@
 [![crates.io](https://img.shields.io/crates/v/skyplug?style=for-the-badge&logo=rust&logoColor=white)](https://crates.io/crates/skyplug)
 
 Command-line tool for inspecting and toggling Skyrim Special Edition's
-`Plugins.txt` load order on Linux/Steam, without a mod manager.
+`Plugins.txt` load order on Linux (Steam, or GOG under Wine/umu), without
+a mod manager.
 
 It scans the game's `Data` directory for `.esp`/`.esm`/`.esl` files,
 cross-references `Plugins.txt` and `Skyrim.ccc`, and reports what's
@@ -94,6 +95,20 @@ libraries, by matching which library actually *owns* the AppID (per
 exist, so a stale install left behind in another library won't be picked by
 mistake. Override with `--game-dir` and `--appid` if needed (e.g. for
 Skyrim VR: `--appid 611670`).
+
+For a copy outside Steam, like GOG's run under umu or Wine, give both the
+game directory and the Wine prefix it runs in (the folder holding
+`drive_c`), as flags or environment variables:
+
+```sh
+export SKYPLUG_GAME_DIR="/games/gog/Skyrim Special Edition"
+export SKYPLUG_PREFIX=/games/gog/prefixes/skyrim-se
+skyplug paths
+```
+
+GOG's build is recognised by its `goggame-*.info` files, and its per-user
+folders are named `Skyrim Special Edition GOG` (both under `AppData/Local`
+and `My Games`). `paths` shows the edition and prefix it settled on.
 
 A `Plugins.txt.bak` is written next to `Plugins.txt` before every change.
 

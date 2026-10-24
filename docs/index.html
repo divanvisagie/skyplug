@@ -18,7 +18,7 @@
 <section class="Sh">
 <h1 class="Sh" id="NAME"><a class="permalink" href="#NAME">NAME</a></h1>
 <p class="Pp"><code class="Nm">skyplug</code> &#x2014; <span class="Nd">inspect
-    and toggle Skyrim Special Edition plugins on Linux/Steam</span></p>
+    and toggle Skyrim Special Edition plugins on Linux</span></p>
 </section>
 <section class="Sh">
 <h1 class="Sh" id="SYNOPSIS"><a class="permalink" href="#SYNOPSIS">SYNOPSIS</a></h1>
@@ -26,6 +26,7 @@
   <tr>
     <td><code class="Nm">skyplug</code></td>
     <td>[<code class="Fl">--game-dir</code> <var class="Ar">dir</var>]
+      [<code class="Fl">--prefix</code> <var class="Ar">dir</var>]
       [<code class="Fl">--appid</code> <var class="Ar">appid</var>]
       <var class="Ar">command</var> [<var class="Ar">args</var>]</td>
   </tr>
@@ -35,12 +36,12 @@
 <h1 class="Sh" id="DESCRIPTION"><a class="permalink" href="#DESCRIPTION">DESCRIPTION</a></h1>
 <p class="Pp"><code class="Nm">skyplug</code> reads and edits the
     <span class="Pa">Plugins.txt</span> load order of a Skyrim Special Edition
-    install running under Proton, without a mod manager. It scans the game's
-    <span class="Pa">Data</span> directory for <span class="Pa">.esp</span>,
-    <span class="Pa">.esm</span> and <span class="Pa">.esl</span> files,
-    cross-references them with <span class="Pa">Plugins.txt</span> and
-    <span class="Pa">Skyrim.ccc</span>, and reports what the engine will
-    actually load.</p>
+    install running under Proton or Wine, Steam's or GOG's, without a mod
+    manager. It scans the game's <span class="Pa">Data</span> directory for
+    <span class="Pa">.esp</span>, <span class="Pa">.esm</span> and
+    <span class="Pa">.esl</span> files, cross-references them with
+    <span class="Pa">Plugins.txt</span> and <span class="Pa">Skyrim.ccc</span>,
+    and reports what the engine will actually load.</p>
 <p class="Pp">It can also read <span class="Pa">.ess</span> save files directly,
     to show which characters exist, which saves belong to each, and which
     plugins were active when a save was made.</p>
@@ -145,7 +146,19 @@
   <dd>Use the Skyrim Special Edition install in <var class="Ar">dir</var> (the
       directory containing <span class="Pa">SkyrimSE.exe</span>) instead of
       searching the Steam libraries. The Proton prefix is looked up in the Steam
-      library that contains <var class="Ar">dir</var>.</dd>
+      library that contains <var class="Ar">dir</var>; for a game outside a
+      Steam library, give its prefix with <code class="Fl">--prefix</code>. A
+      directory holding a <span class="Pa">goggame-*.info</span> file is GOG's
+      build, whose per-user folders are named <span class="Pa">Skyrim Special
+      Edition GOG</span>.</dd>
+  <dt id="prefix"><a class="permalink" href="#prefix"><code class="Fl">--prefix</code></a>
+    <var class="Ar">dir</var></dt>
+  <dd>Read <span class="Pa">Plugins.txt</span> and the saves from the Wine
+      prefix <var class="Ar">dir</var> (the directory holding
+      <span class="Pa">drive_c</span>) instead of the Steam library's Proton
+      prefix, as for GOG's build run under umu or Wine. The Windows user inside
+      it is &#x2018;<code class="Li">steamuser</code>&#x2019; when that exists,
+      as under Proton and umu, else the Unix user.</dd>
   <dt id="appid"><a class="permalink" href="#appid"><code class="Fl">--appid</code></a>
     <var class="Ar">appid</var></dt>
   <dd>Steam AppID used to locate the game and its Proton prefix. Defaults to
@@ -156,6 +169,15 @@
   <dt id="V"><a class="permalink" href="#V"><code class="Fl">-V</code></a>,
     <code class="Fl">--version</code></dt>
   <dd>Print the version.</dd>
+</dl>
+</section>
+<section class="Sh">
+<h1 class="Sh" id="ENVIRONMENT"><a class="permalink" href="#ENVIRONMENT">ENVIRONMENT</a></h1>
+<dl class="Bl-tag">
+  <dt id="SKYPLUG_GAME_DIR"><a class="permalink" href="#SKYPLUG_GAME_DIR"><code class="Ev">SKYPLUG_GAME_DIR</code></a></dt>
+  <dd>Used for <code class="Fl">--game-dir</code> when it isn't given.</dd>
+  <dt id="SKYPLUG_PREFIX"><a class="permalink" href="#SKYPLUG_PREFIX"><code class="Ev">SKYPLUG_PREFIX</code></a></dt>
+  <dd>Used for <code class="Fl">--prefix</code> when it isn't given.</dd>
 </dl>
 </section>
 <section class="Sh">
@@ -219,8 +241,11 @@
     <var class="Ar">lib</var>, and to the Proton user directory inside it,
     <var class="Ar">user</var>, which is
     <span class="Pa">lib/steamapps/compatdata/489830/pfx/drive_c/users/steamuser</span>
-    for the default AppID. <code class="Cm">paths</code> prints the resolved
-    ones.</p>
+    for the default AppID. With <code class="Fl">--prefix</code>,
+    <var class="Ar">user</var> is the user directory in that prefix instead, and
+    for GOG's build the per-user folders are named <span class="Pa">Skyrim
+    Special Edition GOG</span>. <code class="Cm">paths</code> prints the
+    resolved ones.</p>
 <dl class="Bl-tag">
   <dt><span class="Pa">lib/steamapps/common/Skyrim Special
     Edition/Data/</span></dt>
@@ -273,6 +298,12 @@ $ skyplug save-plugins Quicksave0 | grep -v '\[x\]'</pre>
 <pre>$ skyplug --appid 611670 list
 $ skyplug --game-dir &quot;/mnt/games/Skyrim Special Edition&quot; paths</pre>
 </div>
+<p class="Pp">Use GOG's build, run under umu with its own prefix:</p>
+<div class="Bd Pp Bd-indent Li">
+<pre>$ export SKYPLUG_GAME_DIR=&quot;/games/gog/Skyrim Special Edition&quot;
+$ export SKYPLUG_PREFIX=/games/gog/prefixes/skyrim-se
+$ skyplug list</pre>
+</div>
 <p class="Pp">Install this page after &#x2018;<code class="Li">cargo install
     skyplug</code>&#x2019;, or read it without installing:</p>
 <div class="Bd Pp Bd-indent Li">
@@ -293,7 +324,7 @@ $ skyplug man | man -l -</pre>
 </div>
 <table class="foot">
   <tr>
-    <td class="foot-date">October 4, 2026</td>
+    <td class="foot-date">October 24, 2026</td>
     <td class="foot-os">Ubuntu</td>
   </tr>
 </table>

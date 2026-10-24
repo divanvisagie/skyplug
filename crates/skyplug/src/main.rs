@@ -9,14 +9,20 @@ use clap::{Parser, Subcommand};
 use skyplug_core::plugins::{self, ChangeResult, State};
 use skyplug_core::{GameInstall, GamePaths, saves, steam};
 
-/// Scan and toggle Skyrim Special Edition plugins on Linux/Steam.
+/// Scan and toggle Skyrim Special Edition plugins on Linux, Steam or GOG.
 #[derive(Parser)]
 #[command(name = "skyplug", version, about)]
 struct Cli {
     /// Skyrim Special Edition game directory (contains SkyrimSE.exe).
     /// Auto-detected from Steam libraries when omitted.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SKYPLUG_GAME_DIR")]
     game_dir: Option<PathBuf>,
+
+    /// Wine prefix the game runs in (the folder holding drive_c), for a
+    /// copy run outside Steam, like GOG's under umu or Wine. Steam's
+    /// Proton prefix when omitted.
+    #[arg(long, global = true, env = "SKYPLUG_PREFIX")]
+    prefix: Option<PathBuf>,
 
     /// Steam AppID, used to locate the Proton prefix holding Plugins.txt.
     #[arg(long, global = true, default_value = steam::DEFAULT_APPID)]
@@ -67,8 +73,8 @@ const MAN_PAGE: &str = include_str!("../man/skyplug.1");
 
 fn resolve(cli: &Cli) -> Result<GamePaths> {
     let install = match &cli.game_dir {
-        Some(game_dir) => GameInstall::from_game_dir(game_dir).context("--game-dir")?,
-        None => steam::find_game_install(&cli.appid)?,
+        Some(game_dir) => GameInstall::new(game_dir, cli.prefix.clone()).context("--game-dir (a game outside Steam needs --prefix too)")?,
+        None => GameInstall { prefix: cli.prefix.clone(), ..steam::find_game_install(&cli.appid)? },
     };
     Ok(GamePaths::new(&install, &cli.appid))
 }
@@ -167,6 +173,10 @@ fn cmd_edit(resolved: &GamePaths) -> Result<()> {
 
 fn cmd_paths(cli: &Cli, resolved: &GamePaths) -> Result<()> {
     println!("appid:       {}", cli.appid);
+    println!("edition:     {}", resolved.edition.name());
+    if let Some(prefix) = &resolved.prefix {
+        println!("prefix:      {}", prefix.display());
+    }
     println!("data dir:    {}", resolved.data_dir.display());
     println!("plugins.txt: {}", resolved.plugins_txt.display());
     println!("skyrim.ccc:  {}", resolved.ccc_path.display());

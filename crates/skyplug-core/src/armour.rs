@@ -38,11 +38,32 @@ pub struct FormKey {
 const BEAST_RACES: [u32; 2] = [0x0001_3740, 0x0001_3745];
 const SKYRIM_ESM: &str = "skyrim.esm";
 
+/// A swap of textures on one shape of a model: the armature's `MO3S` / `MO2S` lists them, and
+/// an armour whose armature has some looks different from the armour that shares its model
+/// (the Tartan and Dark variants of a mod's outfit are the same mesh with another set).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AltTexture {
+    /// The shape's name in the model; every shape with this name takes the swap.
+    pub shape: String,
+    /// The replacement texture paths by [`crate::nif::slot`], like `textures/armor/x_alt.dds`;
+    /// an empty string leaves that slot as the model has it.
+    pub textures: Vec<String>,
+}
+
+/// A raw alternate-texture entry before its texture-set record is looked up.
+#[derive(Debug, Clone)]
+struct AltRef {
+    shape: String,
+    set: FormKey,
+}
+
 #[derive(Debug, Clone)]
 struct Arma {
     race: Option<FormKey>,
     female: Option<String>,
     male: Option<String>,
+    female_alts: Vec<AltRef>,
+    male_alts: Vec<AltRef>,
     /// The biped slots the armature occupies (bit 0 is slot 30); 0 if it says none.
     slots: u32,
 }
@@ -65,6 +86,8 @@ pub struct Armour {
     /// For each of `models`, the slots of the armature that wears it (bit 0 is slot 30; 0 if
     /// the armature gives none).
     pub model_slots: Vec<u32>,
+    /// For each of `models`, the texture swaps its armature applies (usually none).
+    pub alt_textures: Vec<Vec<AltTexture>>,
     /// Armatures it lists that no loaded plugin defines.
     pub missing_armatures: usize,
 }
@@ -97,6 +120,8 @@ pub struct ArmourCatalog {
     /// Plugins in load order.
     plugins: Vec<PluginFile>,
     armas: HashMap<FormKey, Arma>,
+    /// Texture sets (`TXST`), each as the `TX00`..`TX07` paths by NIF texture slot (see [`TXST_TO_NIF_SLOT`]).
+    texture_sets: HashMap<FormKey, Vec<String>>,
     /// Plugins that couldn't be read, and records skipped, with why.
     problems: Vec<String>,
     language: String,
@@ -106,8 +131,20 @@ impl ArmourCatalog {
     /// Read the `ARMA` records of `plugins`, given in load order.
     pub fn new(plugins: Vec<PluginFile>) -> Self {
         let mut armas = HashMap::new();
+        let mut texture_sets = HashMap::new();
         let mut problems = Vec::new();
         for plugin in &plugins {
+            if plugin.has_group(b"TXST") {
+                match plugin.records(b"TXST") {
+                    Ok(list) => {
+                        for r in &list.records {
+                            let (plugin_name, id) = plugin.resolve(r.form_id);
+                            texture_sets.insert(FormKey { plugin: plugin_name, id }, read_texture_set(r));
+                        }
+                    }
+                    Err(e) => problems.push(format!("{}: {e:#}", plugin.name)),
+                }
+            }
             if !plugin.has_group(b"ARMA") {
                 continue;
             }
@@ -122,7 +159,7 @@ impl ArmourCatalog {
                 Err(e) => problems.push(format!("{}: {e:#}", plugin.name)),
             }
         }
-        ArmourCatalog { plugins, armas, problems, language: "english".into() }
+        ArmourCatalog { plugins, armas, texture_sets, problems, language: "english".into() }
     }
 
     /// Open the plugins named in `load_order` (lowest first) from `data_dir`. Names with no
@@ -245,12 +282,19 @@ impl ArmourCatalog {
         let chosen = if human.is_empty() { found } else { human };
         let mut models: Vec<String> = Vec::new();
         let mut model_slots: Vec<u32> = Vec::new();
+        let mut alt_textures: Vec<Vec<AltTexture>> = Vec::new();
         for a in chosen {
-            if let Some(m) = a.female.as_ref().or(a.male.as_ref()) {
+            let (model, alts) = if a.female.is_some() { (a.female.as_ref(), &a.female_alts) } else { (a.male.as_ref(), &a.male_alts) };
+            if let Some(m) = model {
                 let path = game_path(m);
                 if !models.contains(&path) {
                     models.push(path);
                     model_slots.push(a.slots);
+                    alt_textures.push(
+                        alts.iter()
+                            .filter_map(|r| self.texture_sets.get(&r.set).map(|t| AltTexture { shape: r.shape.clone(), textures: t.clone() }))
+                            .collect(),
+                    );
                 }
             }
         }
@@ -263,6 +307,7 @@ impl ArmourCatalog {
             slots,
             models,
             model_slots,
+            alt_textures,
             missing_armatures,
         }
     }
@@ -274,9 +319,12 @@ fn is_beast_race(k: &FormKey) -> bool {
 
 fn read_arma(plugin: &PluginFile, r: &Record) -> Arma {
     let (mut race, mut female, mut male, mut slots) = (None, None, None, 0);
+    let (mut female_alts, mut male_alts) = (Vec::new(), Vec::new());
     for s in r.subrecords() {
         match &s.kind {
             b"BOD2" | b"BODT" => slots = s.u32().unwrap_or(0),
+            b"MO3S" => female_alts = read_alt_refs(plugin, s.data),
+            b"MO2S" => male_alts = read_alt_refs(plugin, s.data),
             b"RNAM" => {
                 race = s.u32().map(|f| {
                     let (plugin, id) = plugin.resolve(f);
@@ -288,7 +336,58 @@ fn read_arma(plugin: &PluginFile, r: &Record) -> Arma {
             _ => {}
         }
     }
-    Arma { race, female, male, slots }
+    Arma { race, female, male, female_alts, male_alts, slots }
+}
+
+/// An alternate-textures subrecord: a count, then for each a length-prefixed shape name, the
+/// texture set's FormID and the shape's 3D index (not used: shapes are matched by name).
+fn read_alt_refs(plugin: &PluginFile, data: &[u8]) -> Vec<AltRef> {
+    let u32_at = |o: usize| data.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let mut out = Vec::new();
+    let Some(count) = u32_at(0) else { return out };
+    let mut q = 4;
+    for _ in 0..count {
+        let Some(len) = u32_at(q) else { break };
+        let (start, end) = (q + 4, q + 4 + len as usize);
+        let (Some(name), Some(form)) = (data.get(start..end), u32_at(end)) else { break };
+        let (plugin_name, id) = plugin.resolve(form);
+        out.push(AltRef { shape: decode_text(name), set: FormKey { plugin: plugin_name, id } });
+        q = end + 8; // the form and the 3D index
+    }
+    out
+}
+
+/// Which NIF texture slot each of a `TXST` record's `TX00` to `TX07` fills: diffuse, normal,
+/// environment mask, glow, height, environment, multilayer, and backlight/specular.
+pub const TXST_TO_NIF_SLOT: [usize; 8] = [0, 1, 5, 2, 3, 4, 6, 7];
+
+/// A texture set's paths by NIF slot, as game paths (`textures/...`); "" where it has none.
+fn read_texture_set(r: &Record) -> Vec<String> {
+    let mut out = vec![String::new(); 8];
+    for s in r.subrecords() {
+        if let [b'T', b'X', b'0', d @ b'0'..=b'7'] = s.kind {
+            let path = s.string().replace('\\', "/").to_ascii_lowercase();
+            if !path.is_empty() {
+                out[TXST_TO_NIF_SLOT[(d - b'0') as usize]] = if path.starts_with("textures/") { path } else { format!("textures/{path}") };
+            }
+        }
+    }
+    out
+}
+
+/// Put an armour's texture swaps on a parsed model: each shape named in `alts` takes the
+/// replacement paths for the slots they give.
+pub fn apply_alternate_textures(nif: &mut crate::nif::Nif, alts: &[AltTexture]) {
+    for alt in alts {
+        for m in nif.meshes.iter_mut().filter(|m| m.name.eq_ignore_ascii_case(&alt.shape)) {
+            if m.textures.len() < 8 {
+                m.textures.resize(8, String::new());
+            }
+            for (slot, path) in alt.textures.iter().enumerate().filter(|(_, p)| !p.is_empty()) {
+                m.textures[slot] = path.clone();
+            }
+        }
+    }
 }
 
 /// `Armor\Iron\F\CuirassLight_1.nif` as stored in a record becomes `meshes/armor/iron/f/cuirasslight_1.nif`.
@@ -604,6 +703,75 @@ mod tests {
         assert_eq!(a.model_slots, [1 << 18, 0]);
     }
 
+    fn alt_subrecord(entries: &[(&str, u32, i32)]) -> Vec<u8> {
+        let mut d = (entries.len() as u32).to_le_bytes().to_vec();
+        for (name, set, index) in entries {
+            d.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            d.extend_from_slice(name.as_bytes());
+            d.extend_from_slice(&set.to_le_bytes());
+            d.extend_from_slice(&index.to_le_bytes());
+        }
+        d
+    }
+
+    #[test]
+    fn an_armatures_texture_swaps_come_with_its_model() {
+        let data = temp_dir("arm_alt").join("Data");
+        std::fs::create_dir_all(&data).unwrap();
+        let set = record(
+            b"TXST",
+            0x300,
+            &[sub(b"EDID", &zstr("TSAlt")), sub(b"TX00", &zstr("armor\\x\\alt.dds")), sub(b"TX01", &zstr("armor\\x\\alt_n.dds")), sub(b"TX05", &zstr("cubemaps\\c.dds")), sub(b"TX02", &zstr("armor\\x\\alt_m.dds"))],
+            false,
+        );
+        let alt = record(b"ARMA", 0x100, &[sub(b"EDID", &zstr("AltAA")), sub(b"RNAM", &id(0x19)), sub(b"MOD3", &zstr("x\\outfit_1.nif")), sub(b"MO3S", &alt_subrecord(&[("Outfit", 0x300, 1)]))], false);
+        let base = record(b"ARMA", 0x101, &[sub(b"EDID", &zstr("BaseAA")), sub(b"RNAM", &id(0x19)), sub(b"MOD3", &zstr("x\\outfit_1.nif"))], false);
+        let armos = [armo_rec(0x200, "Alt", None, 4, &[0x100]), armo_rec(0x201, "Base", None, 4, &[0x101])];
+        write(&data, "T.esp", &plugin(0, &[], &[group(b"TXST", &[set]), group(b"ARMA", &[alt, base]), group(b"ARMO", &armos)]));
+        let catalog = ArmourCatalog::open(&data, &["T.esp".to_string()]);
+        let list = catalog.armours_in("T.esp", None).unwrap();
+        let (alt, base) = (list.iter().find(|a| a.editor_id == "Alt").unwrap(), list.iter().find(|a| a.editor_id == "Base").unwrap());
+        assert_eq!(alt.models, base.models, "the same model");
+        assert!(base.alt_textures[0].is_empty());
+        let swap = &alt.alt_textures[0];
+        assert_eq!(swap.len(), 1);
+        assert_eq!(swap[0].shape, "Outfit");
+        // TX00 diffuse, TX01 normal, TX02 environment mask (nif slot 5), TX05 environment (nif slot 4).
+        assert_eq!(swap[0].textures[0], "textures/armor/x/alt.dds");
+        assert_eq!(swap[0].textures[1], "textures/armor/x/alt_n.dds");
+        assert_eq!(swap[0].textures[5], "textures/armor/x/alt_m.dds");
+        assert_eq!(swap[0].textures[4], "textures/cubemaps/c.dds");
+        assert_eq!(swap[0].textures[2], "");
+    }
+
+    #[test]
+    fn texture_swaps_change_only_the_named_shape_and_only_the_slots_they_give() {
+        let shape = |name: &str| crate::nif::Mesh { name: name.into(), textures: vec!["a.dds".into(), "a_n.dds".into()], ..Default::default() };
+        let mut nif = crate::nif::Nif { meshes: vec![shape("Outfit"), shape("Boots")], ..Default::default() };
+        let mut textures = vec![String::new(); 8];
+        textures[0] = "textures/alt.dds".into();
+        apply_alternate_textures(&mut nif, &[AltTexture { shape: "outfit".into(), textures }]);
+        assert_eq!(nif.meshes[0].textures[0], "textures/alt.dds");
+        assert_eq!(nif.meshes[0].textures[1], "a_n.dds", "a slot the swap leaves empty is kept");
+        assert_eq!(nif.meshes[0].textures.len(), 8);
+        assert_eq!(nif.meshes[1].textures, ["a.dds", "a_n.dds"], "another shape is untouched");
+    }
+
+    #[test]
+    fn damaged_swap_lists_do_not_panic() {
+        let (data, _) = install("arm_alt_damaged");
+        let file = PluginFile::open(data.join("Skyrim.esm")).unwrap();
+        let good = alt_subrecord(&[("Shape", 0x300, 0), ("Other", 0x301, 1)]);
+        assert_eq!(read_alt_refs(&file, &good).len(), 2);
+        for cut in 0..good.len() {
+            let _ = read_alt_refs(&file, &good[..cut]);
+        }
+        let mut huge = good.clone();
+        huge[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(read_alt_refs(&file, &huge).len(), 2, "a count bigger than the data stops at the data");
+        assert!(read_alt_refs(&file, &[]).is_empty());
+    }
+
     #[test]
     fn slot_names() {
         let a = Armour {
@@ -615,6 +783,7 @@ mod tests {
             slots: 0b100 | 0b1000 | (1 << 14),
             models: vec![],
             model_slots: vec![],
+            alt_textures: vec![],
             missing_armatures: 0,
         };
         assert_eq!(a.slot_names(), ["Body", "Hands", "slot 44"]);
@@ -679,6 +848,26 @@ mod tests {
                     flagged.entry(a.plugin.clone()).or_default().push(format!("{}: {p}", a.label()));
                 }
             }
+        }
+        // Texture swaps: how many armours have them, and do the textures they name exist?
+        let (mut swapped, mut swap_paths, mut swap_missing) = (0, 0, Vec::new());
+        for (name, _) in &plugins {
+            for a in catalog.armours_in(name, Some(&resolver)).unwrap() {
+                let swaps: Vec<&AltTexture> = a.alt_textures.iter().flatten().collect();
+                swapped += usize::from(!swaps.is_empty());
+                for alt in swaps {
+                    for t in alt.textures.iter().filter(|t| !t.is_empty()) {
+                        swap_paths += 1;
+                        if resolver.resolve(t).is_none() {
+                            swap_missing.push(format!("{} / {}: {t}", a.plugin, a.label()));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("{swapped} armours swap textures; {swap_paths} swapped-in textures, {} not found:", swap_missing.len());
+        for m in swap_missing.iter().take(6) {
+            eprintln!("   {m}");
         }
         eprintln!("{checked} models checked against their armatures' slots; {} plugins have a mismatch:", flagged.len());
         for (plugin, v) in &flagged {

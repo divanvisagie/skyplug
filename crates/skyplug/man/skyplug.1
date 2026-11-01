@@ -150,15 +150,14 @@ An armour a plugin only changes is marked with the plugin that adds it.
 keeps armours whose name or editor ID contains
 .Ar text .
 .Fl -check
-also reads each armour's models and marks with
-.Sy !
+also reads each armour's models and flags with an exclamation mark
 any the game won't draw: a skinned model records which slot each skin partition belongs to,
 and the game only draws a partition whose slot is among the slots of the armature wearing it,
 so moving an armour to another slot in its plugin without moving its model makes it
 invisible.
 .Cm preview Fl -armour
 warns about the same.
-.It Cm preview Ar model Op Fl o | Fl -out Ar file Op Fl -views Ar list Op Fl -size Ar pixels Op Fl -body Op Fl -with Ar model Op Fl -elevation Ar degrees Op Fl -zoom Ar factor Op Fl -transparent
+.It Cm preview Ar model Op Fl o | Fl -out Ar file Op Fl -views Ar list Op Fl -size Ar pixels Op Fl -body Op Fl -with Ar model Op Fl -elevation Ar degrees Op Fl -zoom Ar factor Op Fl -transparent Op Fl -no-pose
 Draw
 .Ar model
 with its textures and write a PNG with the views side by side, and print where each
@@ -194,6 +193,12 @@ Camera height above the horizon; the default is 6.
 1 fits the whole model; larger zooms in.
 .It Fl -transparent
 Use a transparent background.
+.It Fl -no-pose
+Draw skinned models as they are stored.
+By default they are posed on the game's female skeleton, as the game does: each vertex moves by
+the bones it is weighted to, so a model made on a skeleton that differs from the game's (a few
+mods' are shifted by a couple of units) comes out where it does in game, next to the pieces made
+on the right one.
 .El
 .It Cm man Op Fl -install
 Print this manual page to standard output.

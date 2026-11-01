@@ -22,7 +22,7 @@ use anyhow::Result;
 
 use crate::assets::AssetResolver;
 use crate::dds::{Dds, Rgba};
-use crate::nif::{self, Mesh, Nif};
+use crate::nif::{self, Mesh, Nif, Skeleton};
 
 /// Whether triangles wind counter-clockwise when seen from the front, as
 /// Skyrim's do.
@@ -35,6 +35,20 @@ pub const FEMALE_BODY: [&str; 3] = [
     "meshes/actors/character/character assets/femalehands_1.nif",
     "meshes/actors/character/character assets/femalefeet_1.nif",
 ];
+
+/// The game's female skeleton, which skinned models are posed on.
+pub const FEMALE_SKELETON: &str = "meshes/actors/character/character assets female/skeleton_female.nif";
+
+/// What [`Model::pose`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PoseReport {
+    /// Skinned meshes it could pose.
+    pub posed: usize,
+    /// How many of those moved by more than a hundredth of a unit.
+    pub moved: usize,
+    /// The largest distance any vertex moved, in game units.
+    pub largest: f32,
+}
 
 /// `BSLightingShaderProperty`'s shader type for skin.
 const SHADER_SKIN_TINT: u32 = 5;
@@ -126,6 +140,12 @@ pub struct Model {
     pub textures: Vec<TextureStatus>,
     /// Problems from reading the model, as [`nif::Nif::warnings`], plus texture problems.
     pub warnings: Vec<String>,
+}
+
+/// The game's female skeleton, read through `resolver`; `None` if the game has none.
+pub fn load_skeleton(resolver: &AssetResolver) -> Option<Skeleton> {
+    let bytes = resolver.read_asset(FEMALE_SKELETON).ok()??;
+    nif::parse(&bytes).ok().map(|n| Skeleton::from_nif(&n)).filter(|s| !s.is_empty())
 }
 
 impl Model {
@@ -220,6 +240,32 @@ impl Model {
             m.underlay = true;
         }
         self.merge(other);
+    }
+
+    /// Pose the skinned meshes on `skeleton`, as the game does: each vertex moves by the
+    /// bones it's weighted to (see [`Mesh::pose`]). A model made on a skeleton that differs
+    /// from the game's (a few mods' are shifted by a couple of units) comes out where it
+    /// does in game. Meshes with no skin data are left as they are.
+    pub fn pose(&mut self, skeleton: &Skeleton) -> PoseReport {
+        let mut report = PoseReport::default();
+        for m in &mut self.meshes {
+            if m.mesh.skin.is_none() {
+                continue;
+            }
+            let posed = m.mesh.pose(skeleton);
+            let moved = m
+                .mesh
+                .positions
+                .iter()
+                .zip(&posed.positions)
+                .map(|(a, b)| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt())
+                .fold(0f32, f32::max);
+            report.posed += 1;
+            report.moved += usize::from(moved > 0.01);
+            report.largest = report.largest.max(moved);
+            m.mesh = posed;
+        }
+        report
     }
 
     /// Number of meshes that will be drawn.

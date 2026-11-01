@@ -58,9 +58,12 @@ Draws the model from several sides into one PNG and lists every texture it
 uses, as the game resolves them: the loose file or archive that wins, what it
 hides, or `MISSING`. That answers "is my loose file being used?" without
 launching the game. `--body` adds the installed female body for scale;
-`--with` adds more pieces, and `--armour` picks an armour by name or editor ID
+`--with` adds more pieces, skinned models are posed on the game's skeleton
+as the game does (`--no-pose` draws them as stored; the output says what
+moved), and `--armour` picks an armour by name or editor ID
 from the load order (see `skyplug armours`), drawn as the load order wears it:
-a plugin that refits vanilla armours shows the refitted models.
+a plugin that refits vanilla armours shows the refitted models, and a variant
+with its own texture set (Tartan, Dark) is drawn with it.
 
 It's a software preview for checking shape, texture mapping and colour, not
 the game's renderer: no normal, specular or glow maps and no skin or hair

@@ -123,6 +123,79 @@
   <dd>List the plugins that were active when <var class="Ar">save</var> was
       made, each marked against the current setup with the same markers as
       <code class="Cm">list</code>.</dd>
+  <dt id="armours"><a class="permalink" href="#armours"><code class="Cm">armours</code></a>
+    [<var class="Ar">plugin</var> [<code class="Fl">--filter</code>
+    <var class="Ar">text</var> [<code class="Fl">--check</code>]]]</dt>
+  <dd>Without <var class="Ar">plugin</var>, list the plugins in the load order
+      that have armour records, with how many. With one, list its armours: name,
+      editor ID, the slots it covers, and the models it is worn as (for a female
+      character, the human races), as the load order wears it: the last plugin
+      that changes an armature decides, so a plugin that refits vanilla armours
+      shows the refitted models. An armour a plugin only changes is marked with
+      the plugin that adds it. <code class="Fl">--filter</code> keeps armours
+      whose name or editor ID contains <var class="Ar">text</var>.
+      <code class="Fl">--check</code> also reads each armour's models and flags
+      with an exclamation mark any the game won't draw: a skinned model records
+      which slot each skin partition belongs to, and the game only draws a
+      partition whose slot is among the slots of the armature wearing it, so
+      moving an armour to another slot in its plugin without moving its model
+      makes it invisible. <code class="Cm">preview</code>
+      <code class="Fl">--armour</code> warns about the same.</dd>
+  <dt id="preview"><a class="permalink" href="#preview"><code class="Cm">preview</code></a>
+    <var class="Ar">model</var> [<code class="Fl">-o</code> |
+    <code class="Fl">--out</code> <var class="Ar">file</var>
+    [<code class="Fl">--views</code> <var class="Ar">list</var>
+    [<code class="Fl">--size</code> <var class="Ar">pixels</var>
+    [<code class="Fl">--body</code> [<code class="Fl">--with</code>
+    <var class="Ar">model</var> [<code class="Fl">--elevation</code>
+    <var class="Ar">degrees</var> [<code class="Fl">--zoom</code>
+    <var class="Ar">factor</var> [<code class="Fl">--transparent</code>
+    [<code class="Fl">--no-pose</code>]]]]]]]]]</dt>
+  <dd>Draw <var class="Ar">model</var> with its textures and write a PNG with
+      the views side by side, and print where each texture came from (the loose
+      file or archive the game uses, what it hides, or that it is missing).
+      <var class="Ar">model</var> is a game path such as
+      <span class="Pa">meshes/armor/iron/f/cuirass_1.nif</span>, or a
+      <span class="Pa">.nif</span> file on disk. This is a software preview for
+      checking shape, texture mapping and colours, not the game's renderer: no
+      normal, specular or glow maps and no skin or hair tint. Skyrim LE models
+      are refused.
+    <dl class="Bl-tag">
+      <dt id="views"><a class="permalink" href="#views"><code class="Fl">--views</code></a>
+        <var class="Ar">list</var></dt>
+      <dd>Comma-separated views: front, three-quarter, right, back, left, or an
+          angle in degrees. The default is front, three-quarter, right and
+        back.</dd>
+      <dt id="size"><a class="permalink" href="#size"><code class="Fl">--size</code></a>
+        <var class="Ar">pixels</var></dt>
+      <dd>Width and height of each view; the default is 480.</dd>
+      <dt id="body"><a class="permalink" href="#body"><code class="Fl">--body</code></a></dt>
+      <dd>Also draw the installed female body, hands and feet, for scale.</dd>
+      <dt id="with"><a class="permalink" href="#with"><code class="Fl">--with</code></a>
+        <var class="Ar">model</var></dt>
+      <dd>Draw another model as well; can be repeated.</dd>
+      <dt id="armour"><a class="permalink" href="#armour"><code class="Fl">--armour</code></a>
+        <var class="Ar">text</var></dt>
+      <dd>Draw an armour by name or editor ID, as the load order wears it; can
+          be repeated. Use <var class="Ar">-</var> as the model to draw only
+          armours.</dd>
+      <dt id="elevation"><a class="permalink" href="#elevation"><code class="Fl">--elevation</code></a>
+        <var class="Ar">degrees</var></dt>
+      <dd>Camera height above the horizon; the default is 6.</dd>
+      <dt id="zoom"><a class="permalink" href="#zoom"><code class="Fl">--zoom</code></a>
+        <var class="Ar">factor</var></dt>
+      <dd>1 fits the whole model; larger zooms in.</dd>
+      <dt id="transparent"><a class="permalink" href="#transparent"><code class="Fl">--transparent</code></a></dt>
+      <dd>Use a transparent background.</dd>
+      <dt id="no-pose"><a class="permalink" href="#no-pose"><code class="Fl">--no-pose</code></a></dt>
+      <dd>Draw skinned models as they are stored. By default they are posed on
+          the game's female skeleton, as the game does: each vertex moves by the
+          bones it is weighted to, so a model made on a skeleton that differs
+          from the game's (a few mods' are shifted by a couple of units) comes
+          out where it does in game, next to the pieces made on the right
+        one.</dd>
+    </dl>
+  </dd>
   <dt id="man"><a class="permalink" href="#man"><code class="Cm">man</code></a>
     [<code class="Fl">--install</code>]</dt>
   <dd>Print this manual page to standard output. With

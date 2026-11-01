@@ -42,8 +42,13 @@ decides how to present them.
   with node transforms applied. Handles skinned shapes (geometry in
   `NiSkinPartition`), the older `NiTriShape`, and switch nodes. Skyrim LE
   models come back as a `LegacyFormat` error; unreadable blocks become
-  warnings and the rest still loads. No skeletons, animation, collision,
-  particles or face meshes yet.
+  warnings and the rest still loads. A skinned shape keeps its bones, bind
+  transforms and per-vertex weights, and `Mesh::pose(&Skeleton)` moves it the
+  way the game does, by the weighted bones of the game's skeleton
+  (`Skeleton::from_nif` of `skeleton_female.nif`): a model made on a skeleton
+  that differs from the game's (a few mods' are shifted by a couple of units)
+  comes out where it does in game. No animation, collision, particles or face
+  meshes yet.
 - **`records`** — reads plugin files: the header (flags, masters) and the
   records of one top-level group at a time, with zlib-compressed bodies,
   subrecords and FormIDs resolved to the plugin that defines them. Read-only.
@@ -56,12 +61,17 @@ decides how to present them.
   which shapes the game won't draw: it only draws a skin partition whose slot
   is among the slots of the armature wearing it (`partition_problems`), so an
   armour moved to another slot in its plugin without its model is invisible.
+  Armatures' texture swaps (`MO3S`/`MO2S` with the `TXST` texture sets they
+  name) come with each model as `Armour::alt_textures`, and
+  `apply_alternate_textures` puts them on a parsed model: the Tartan and Dark
+  variants of an outfit are the same mesh with another set.
 - **`render`** — a small software renderer: a `Model` is meshes plus their
   diffuse textures resolved through an `AssetResolver` (with a report of
   where every texture came from, or that it's missing), and `render` draws it
   from a `Camera` into RGBA with a z-buffer, backface culling, alpha test and
-  blend, and supersampling. For checking shape, mapping and colour, not the
-  game's shading.
+  blend, and supersampling. `Model::pose` poses its skinned meshes on a
+  skeleton (`render::load_skeleton` reads the game's) and reports what moved.
+  For checking shape, mapping and colour, not the game's shading.
 - **`assets`** — `AssetResolver` finds an asset the way the game does, and
   says what it hides: loose files in `Data` first, then archives in load
   order (the base game's from `Skyrim_Default.ini`, `Skyrim.ini` and
@@ -75,7 +85,7 @@ for the merged plugin status.
 
 ```toml
 [dependencies]
-skyplug-core = "0.1"
+skyplug-core = "0.3"
 ```
 
 ```rust,no_run

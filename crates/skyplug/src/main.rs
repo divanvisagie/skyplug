@@ -119,6 +119,9 @@ struct PreviewArgs {
     /// A transparent background instead of dark grey.
     #[arg(long)]
     transparent: bool,
+    /// Draw skinned models as stored, instead of posed on the game's skeleton.
+    #[arg(long)]
+    no_pose: bool,
 }
 
 const MAN_PAGE: &str = include_str!("../man/skyplug.1");
@@ -315,6 +318,14 @@ fn view_angle(name: &str) -> Result<f32> {
     })
 }
 
+/// A model from the game's assets with an armour's texture swaps applied.
+fn load_with_swaps(resolver: &AssetResolver, name: &str, alts: &[armour::AltTexture]) -> Result<Option<render::Model>> {
+    let Some(bytes) = resolver.read_asset(name).with_context(|| format!("reading {name}"))? else { return Ok(None) };
+    let mut parsed = nif::parse(&bytes).with_context(|| format!("reading {name}"))?;
+    armour::apply_alternate_textures(&mut parsed, alts);
+    Ok(Some(render::Model::load(resolver, &parsed, 1024)))
+}
+
 /// Read a model from a file on disk if there is one, else from the game's assets.
 fn load_model(resolver: &AssetResolver, name: &str) -> Result<Option<render::Model>> {
     let max_texture = 1024;
@@ -393,8 +404,8 @@ fn cmd_preview(resolved: &GamePaths, a: &PreviewArgs) -> Result<()> {
             for problem in armour.visibility_problems(&resolver) {
                 println!("  WARNING: {problem}");
             }
-            for m in &armour.models {
-                model.merge(load_model(&resolver, m)?.with_context(|| format!("{m}: the game has no such file"))?);
+            for (m, alts) in armour.models.iter().zip(&armour.alt_textures) {
+                model.merge(load_with_swaps(&resolver, m, alts)?.with_context(|| format!("{m}: the game has no such file"))?);
             }
         }
     }
@@ -410,6 +421,15 @@ fn cmd_preview(resolved: &GamePaths, a: &PreviewArgs) -> Result<()> {
         model.merge(load_model(&resolver, extra)?.with_context(|| format!("{extra}: the game has no such file"))?);
     }
     anyhow::ensure!(model.mesh_count() > 0, "{}: nothing to draw (no meshes it can read)", a.model);
+    if !a.no_pose {
+        match render::load_skeleton(&resolver) {
+            Some(skeleton) => {
+                let r = model.pose(&skeleton);
+                println!("posed {} skinned meshes on the game's skeleton: {} move, by up to {:.1} units", r.posed, r.moved, r.largest);
+            }
+            None => eprintln!("note: this install has no female skeleton; drawing models as stored"),
+        }
+    }
 
     println!("{} meshes", model.mesh_count());
     for t in &model.textures {

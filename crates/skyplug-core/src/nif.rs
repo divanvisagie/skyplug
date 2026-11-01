@@ -25,7 +25,7 @@
 //! allocation is sized by a number in the file without checking it fits in
 //! the file first.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use anyhow::{Context, Result, ensure};
@@ -77,6 +77,9 @@ pub struct Nif {
     /// Block types that probably carry visible geometry but aren't handled
     /// (so something may be missing from `meshes`). Deduplicated, sorted.
     pub unsupported: Vec<String>,
+    /// Every named node (bones among them) with its transform in the model's own space, in file
+    /// order. A skeleton model's nodes make a [`Skeleton`].
+    pub nodes: Vec<(String, Transform)>,
 }
 
 /// Alpha handling from `NiAlphaProperty`.
@@ -119,6 +122,113 @@ pub struct Mesh {
     /// number them. Empty for a shape with no such partitions. The game only draws a partition
     /// whose slot is among the slots of the armour addon wearing the model.
     pub body_parts: Vec<u16>,
+    /// What the game needs to pose the shape on a skeleton; `None` for shapes with no skin data.
+    /// [`Mesh::pose`] uses it. `positions` and `normals` are the stored pose.
+    pub skin: Option<Skin>,
+}
+
+/// A skinned shape's bones, bind transforms and per-vertex weights, with its vertices as stored
+/// in the shape (before any transform).
+#[derive(Debug, Clone)]
+pub struct Skin {
+    local_positions: Vec<[f32; 3]>,
+    local_normals: Vec<[f32; 3]>,
+    bones: Vec<SkinBone>,
+    weights: Vec<[f32; 4]>,
+    indices: Vec<[u8; 4]>,
+}
+
+/// One bone of a skin.
+#[derive(Debug, Clone)]
+pub struct SkinBone {
+    /// The bone's node name, like `NPC L Thigh [LThg]`.
+    pub name: String,
+    /// From the skin's space to the bone's, at the pose the model was made in.
+    bind: Transform,
+    /// The bone's own transform in this model, for a bone the skeleton doesn't have.
+    file_world: Transform,
+}
+
+impl Skin {
+    /// The names of the bones, in the order vertices index them.
+    pub fn bone_names(&self) -> impl Iterator<Item = &str> {
+        self.bones.iter().map(|b| b.name.as_str())
+    }
+}
+
+/// The bones of a skeleton, by name, with their transforms: what the game moves skinned models
+/// by. Made from a skeleton model such as `skeleton_female.nif`.
+#[derive(Debug, Clone, Default)]
+pub struct Skeleton {
+    bones: HashMap<String, Transform>,
+}
+
+impl Skeleton {
+    /// The named nodes of a parsed skeleton model.
+    pub fn from_nif(nif: &Nif) -> Self {
+        Skeleton { bones: nif.nodes.iter().map(|(n, t)| (n.to_ascii_lowercase(), *t)).collect() }
+    }
+
+    /// A bone's transform by name (any case).
+    pub fn bone(&self, name: &str) -> Option<&Transform> {
+        self.bones.get(&name.to_ascii_lowercase())
+    }
+
+    pub fn len(&self) -> usize {
+        self.bones.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bones.is_empty()
+    }
+}
+
+impl Mesh {
+    /// The shape as the game poses it on `skeleton`: each vertex goes to the weighted average over
+    /// its bones of `bone's transform in the skeleton * the bone's bind transform` applied to the
+    /// vertex as stored. A model made on a skeleton that differs from the game's therefore moves
+    /// as it does in game; one made on the game's own comes out as it was stored. Bones the
+    /// skeleton lacks use the model's own, and a shape with no skin data is returned unchanged.
+    pub fn pose(&self, skeleton: &Skeleton) -> Mesh {
+        let Some(skin) = &self.skin else { return self.clone() };
+        let to_world: Vec<Transform> = skin
+            .bones
+            .iter()
+            .map(|b| skeleton.bone(&b.name).copied().unwrap_or(b.file_world).then(&b.bind))
+            .collect();
+        let mut out = self.clone();
+        for v in 0..skin.local_positions.len() {
+            let (mut p, mut n, mut total) = ([0f32; 3], [0f32; 3], 0f32);
+            for k in 0..4 {
+                let w = skin.weights[v][k];
+                if w <= 1e-6 {
+                    continue;
+                }
+                let Some(t) = to_world.get(skin.indices[v][k] as usize) else { continue };
+                let moved = t.point(skin.local_positions[v]);
+                for c in 0..3 {
+                    p[c] += w * moved[c];
+                }
+                if !skin.local_normals.is_empty() {
+                    let r = t.rotate(skin.local_normals[v]);
+                    for c in 0..3 {
+                        n[c] += w * r[c];
+                    }
+                }
+                total += w;
+            }
+            if total > 1e-6 {
+                out.positions[v] = p.map(|c| c / total);
+                if !skin.local_normals.is_empty() {
+                    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    if len > 1e-6 {
+                        out.normals[v] = n.map(|c| c / len);
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Mesh {
@@ -226,39 +336,42 @@ fn half(h: u16) -> f32 {
 
 // -------------------------------------------------------------- transforms
 
-#[derive(Clone, Copy)]
-struct Xf {
-    t: [f32; 3],
-    r: [[f32; 3]; 3],
-    s: f32,
+/// A rotation, translation and uniform scale: `p -> t + s * (r * p)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transform {
+    pub t: [f32; 3],
+    pub r: [[f32; 3]; 3],
+    pub s: f32,
 }
 
-impl Xf {
-    const IDENT: Xf = Xf { t: [0.0; 3], r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], s: 1.0 };
+impl Transform {
+    pub const IDENT: Transform = Transform { t: [0.0; 3], r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], s: 1.0 };
 
-    fn is_ident(&self) -> bool {
+    pub fn is_ident(&self) -> bool {
         self.t == [0.0; 3] && self.r == Self::IDENT.r && self.s == 1.0
     }
-    fn rotate(&self, v: [f32; 3]) -> [f32; 3] {
+    /// Rotate a direction (no translation or scale).
+    pub fn rotate(&self, v: [f32; 3]) -> [f32; 3] {
         let mut o = [0f32; 3];
         for (i, row) in self.r.iter().enumerate() {
             o[i] = row[0] * v[0] + row[1] * v[1] + row[2] * v[2];
         }
         o
     }
-    fn point(&self, v: [f32; 3]) -> [f32; 3] {
+    /// Move a point.
+    pub fn point(&self, v: [f32; 3]) -> [f32; 3] {
         let r = self.rotate(v);
         [self.t[0] + self.s * r[0], self.t[1] + self.s * r[1], self.t[2] + self.s * r[2]]
     }
     /// `self` is the parent's transform, `c` the child's: the child's, in the parent's parent's space.
-    fn then(&self, c: &Xf) -> Xf {
+    pub fn then(&self, c: &Transform) -> Transform {
         let mut r = [[0f32; 3]; 3];
         for (i, row) in r.iter_mut().enumerate() {
             for (j, v) in row.iter_mut().enumerate() {
                 *v = (0..3).map(|k| self.r[i][k] * c.r[k][j]).sum();
             }
         }
-        Xf { t: self.point(c.t), r, s: self.s * c.s }
+        Transform { t: self.point(c.t), r, s: self.s * c.s }
     }
 }
 
@@ -267,7 +380,7 @@ impl Xf {
 struct AvObject {
     name: String,
     flags: u32,
-    xf: Xf,
+    xf: Transform,
 }
 
 fn string_at(strings: &[String], i: i32) -> String {
@@ -293,7 +406,7 @@ fn av_object(r: &mut Reader, strings: &[String]) -> Result<AvObject> {
     }
     let s = r.f32()?;
     r.i32()?; // collision object
-    Ok(AvObject { name, flags, xf: Xf { t, r: rot, s } })
+    Ok(AvObject { name, flags, xf: Transform { t, r: rot, s } })
 }
 
 #[derive(Default, Clone)]
@@ -303,6 +416,10 @@ struct Geometry {
     uvs: Vec<[f32; 2]>,
     colors: Vec<[u8; 4]>,
     triangles: Vec<[u16; 3]>,
+    /// Skinned vertices: four bone weights and four bone indices each (indices into the skin
+    /// instance's bone list, checked against the skin data on real models: 100% of 48,317 vertices).
+    skin_weights: Vec<[f32; 4]>,
+    skin_bones: Vec<[u8; 4]>,
 }
 
 /// Decode a packed SE vertex buffer described by `desc` (see `BSVertexDesc`).
@@ -340,9 +457,9 @@ fn decode_vertices(raw: &[u8], desc: u64, n: usize, g: &mut Geometry) -> Result<
     ensure!(has(VF_VERTEX), "vertex format has no positions (flags {flags:#x})");
     ensure!(size == expected, "vertex size {size} doesn't match the format's {expected} (flags {flags:#x})");
     ensure!(n.checked_mul(size).is_some_and(|t| t <= raw.len()), "vertex data is cut off");
-    let (o_pos, o_uv, o_normal, o_color) = (off(4), off(8), off(16), off(24));
+    let (o_pos, o_uv, o_normal, o_color, o_skin) = (off(4), off(8), off(16), off(24), off(28));
     // Every attribute we read must lie inside the vertex, whatever the descriptor says.
-    for (flag, offset, len) in [(VF_VERTEX, o_pos, 12), (VF_UV, o_uv, 4), (VF_NORMAL, o_normal, 3), (VF_COLORS, o_color, 4)] {
+    for (flag, offset, len) in [(VF_VERTEX, o_pos, 12), (VF_UV, o_uv, 4), (VF_NORMAL, o_normal, 3), (VF_COLORS, o_color, 4), (VF_SKINNED, o_skin, 12)] {
         ensure!(!has(flag) || offset + len <= size, "vertex attribute at {offset} doesn't fit a {size}-byte vertex");
     }
     for v in raw.chunks_exact(size).take(n) {
@@ -358,6 +475,11 @@ fn decode_vertices(raw: &[u8], desc: u64, n: usize, g: &mut Geometry) -> Result<
         }
         if has(VF_COLORS) {
             g.colors.push(v[o_color..o_color + 4].try_into().unwrap());
+        }
+        if has(VF_SKINNED) {
+            let h = |k: usize| half(u16::from_le_bytes(v[o_skin + 2 * k..o_skin + 2 * k + 2].try_into().unwrap()));
+            g.skin_weights.push([h(0), h(1), h(2), h(3)]);
+            g.skin_bones.push(v[o_skin + 8..o_skin + 12].try_into().unwrap());
         }
     }
     Ok(())
@@ -460,6 +582,35 @@ fn ni_tri_shape_data(r: &mut Reader) -> Result<Geometry> {
 }
 
 /// Geometry of a skinned shape, from `NiSkinPartition`; must use the whole block.
+/// An `NiTransform` as `NiSkinData` stores it: rotation, then translation, then scale.
+fn ni_transform(r: &mut Reader) -> Result<Transform> {
+    let mut rot = [[0f32; 3]; 3];
+    for row in &mut rot {
+        *row = r.f32s::<3>()?;
+    }
+    let t = r.f32s::<3>()?;
+    Ok(Transform { t, r: rot, s: r.f32()? })
+}
+
+/// The bind transform of each bone in an `NiSkinData`; the per-bone weight lists it also holds
+/// are skipped (the vertex data has the weights).
+fn skin_data(r: &mut Reader) -> Result<Vec<Transform>> {
+    ni_transform(r)?; // the skin's own transform
+    let n = r.u32()? as usize;
+    let has_weights = r.u8()? != 0;
+    r.fits(n, 52 + 16 + 2)?;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(ni_transform(r)?);
+        r.skip(16)?; // bounding sphere
+        let verts = r.u16()? as usize;
+        if has_weights {
+            r.skip(verts * 6)?;
+        }
+    }
+    Ok(out)
+}
+
 fn skin_partition(r: &mut Reader) -> Result<Geometry> {
     let parts = r.u32()? as usize;
     let data_size = r.u32()? as usize;
@@ -532,7 +683,9 @@ enum Block {
     Node(Node),
     Shape(Shape),
     TriData(Geometry),
-    SkinInstance { partition: i32, parts: Vec<u16> },
+    SkinInstance { data: i32, partition: i32, bones: Vec<i32>, parts: Vec<u16> },
+    /// Each bone's bind transform: from the skin's space to the bone's.
+    SkinData(Vec<Transform>),
     SkinPartition(Geometry),
     Lighting { shader_type: u32, flags2: u32, texture_set: i32 },
     Effect { flags2: u32, texture: String },
@@ -551,14 +704,12 @@ fn parse_block(ty: &str, data: &[u8], strings: &[String]) -> Result<Option<Block
         "NiTriShape" => Block::Shape(ni_tri_shape(r, strings)?),
         "NiTriShapeData" => Block::TriData(ni_tri_shape_data(r)?),
         "NiSkinInstance" | "BSDismemberSkinInstance" => {
-            r.i32()?; // NiSkinData
+            let data = r.i32()?; // NiSkinData
             let partition = r.i32()?;
+            r.i32()?; // skeleton root
+            let bones = r.refs()?;
             let mut parts = Vec::new();
             if ty == "BSDismemberSkinInstance" {
-                r.i32()?; // skeleton root
-                let bones = r.u32()? as usize;
-                r.fits(bones, 4)?;
-                r.skip(bones * 4)?;
                 let n = r.u32()? as usize;
                 r.fits(n, 4)?;
                 for _ in 0..n {
@@ -566,8 +717,9 @@ fn parse_block(ty: &str, data: &[u8], strings: &[String]) -> Result<Option<Block
                     parts.push(r.u16()?);
                 }
             }
-            Block::SkinInstance { partition, parts }
+            Block::SkinInstance { data, partition, bones, parts }
         }
+        "NiSkinData" => Block::SkinData(skin_data(r)?),
         "NiSkinPartition" => Block::SkinPartition(skin_partition(r)?),
         "BSLightingShaderProperty" => {
             let shader_type = r.u32()?;
@@ -684,11 +836,40 @@ fn assemble(blocks: &[Option<Block>], nif: &mut Nif) {
             is_child.extend(n.children.iter().copied().filter(|&c| c >= 0).map(|c| c as usize));
         }
     }
-    let mut stack: Vec<(usize, Xf)> = blocks
+    // Every node's transform in the model's space (bones are found by these, wherever they hang).
+    let mut worlds: HashMap<usize, Transform> = HashMap::new();
+    {
+        let mut todo: Vec<(usize, Transform)> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(i, b)| matches!(b, Some(Block::Node(_))) && !is_child.contains(i))
+            .map(|(i, _)| (i, Transform::IDENT))
+            .collect();
+        while let Some((i, parent)) = todo.pop() {
+            if worlds.contains_key(&i) {
+                continue;
+            }
+            if let Some(Block::Node(n)) = blocks.get(i).and_then(Option::as_ref) {
+                let world = parent.then(&n.av.xf);
+                worlds.insert(i, world);
+                todo.extend(n.children.iter().filter(|&&c| c >= 0).map(|&c| (c as usize, world)));
+            }
+        }
+        let mut named: Vec<(usize, &str)> = worlds
+            .keys()
+            .filter_map(|&i| match &blocks[i] {
+                Some(Block::Node(n)) if !n.av.name.is_empty() => Some((i, n.av.name.as_str())),
+                _ => None,
+            })
+            .collect();
+        named.sort_by_key(|(i, _)| *i);
+        nif.nodes = named.into_iter().map(|(i, name)| (name.to_string(), worlds[&i])).collect();
+    }
+    let mut stack: Vec<(usize, Transform)> = blocks
         .iter()
         .enumerate()
         .filter(|(i, b)| matches!(b, Some(Block::Node(_) | Block::Shape(_))) && !is_child.contains(i))
-        .map(|(i, _)| (i, Xf::IDENT))
+        .map(|(i, _)| (i, Transform::IDENT))
         .rev()
         .collect();
 
@@ -709,7 +890,7 @@ fn assemble(blocks: &[Option<Block>], nif: &mut Nif) {
                 }
             }
             Some(Block::Shape(s)) => {
-                match build_mesh(s, &parent, &get) {
+                match build_mesh(s, &parent, &get, &worlds) {
                     Ok(m) => nif.meshes.push(m),
                     Err(e) => nif.warnings.push(format!("shape '{}' (block {i}): {e}", s.av.name)),
                 }
@@ -719,7 +900,12 @@ fn assemble(blocks: &[Option<Block>], nif: &mut Nif) {
     }
 }
 
-fn build_mesh<'a>(s: &Shape, parent: &Xf, get: &impl Fn(i32) -> Option<&'a Block>) -> Result<Mesh> {
+fn build_mesh<'a>(
+    s: &Shape,
+    parent: &Transform,
+    get: &impl Fn(i32) -> Option<&'a Block>,
+    worlds: &HashMap<usize, Transform>,
+) -> Result<Mesh> {
     let skinned = s.skin >= 0;
     let body_parts = match get(s.skin) {
         Some(Block::SkinInstance { parts, .. }) => parts.clone(),
@@ -748,8 +934,34 @@ fn build_mesh<'a>(s: &Shape, parent: &Xf, get: &impl Fn(i32) -> Option<&'a Block
     let n = geometry.positions.len();
     ensure!(n > 0, "no vertices");
     ensure!(!geometry.triangles.iter().flatten().any(|&i| i as usize >= n), "a triangle uses a vertex that doesn't exist");
+    // What posing needs, taken before the shape's transform is baked into the vertices.
+    let skin = match (skinned, get(s.skin)) {
+        (true, Some(Block::SkinInstance { data, bones, .. })) => match get(*data) {
+            Some(Block::SkinData(binds)) if binds.len() == bones.len() && geometry.skin_weights.len() == n => Some(Skin {
+                local_positions: geometry.positions.clone(),
+                local_normals: if geometry.normals.len() == n { geometry.normals.clone() } else { vec![] },
+                bones: bones
+                    .iter()
+                    .zip(binds)
+                    .map(|(&r, bind)| SkinBone {
+                        name: match get(r) {
+                            Some(Block::Node(node)) => node.av.name.clone(),
+                            _ => String::new(),
+                        },
+                        bind: *bind,
+                        file_world: usize::try_from(r).ok().and_then(|i| worlds.get(&i)).copied().unwrap_or(Transform::IDENT),
+                    })
+                    .collect(),
+                weights: geometry.skin_weights.clone(),
+                indices: geometry.skin_bones.clone(),
+            }),
+            _ => None,
+        },
+        _ => None,
+    };
     let mut m = Mesh {
         name: s.av.name.clone(),
+        skin,
         positions: geometry.positions,
         normals: if geometry.normals.len() == n { geometry.normals } else { vec![] },
         uvs: if geometry.uvs.len() == n { geometry.uvs } else { vec![] },
@@ -1159,6 +1371,134 @@ pub(crate) mod tests {
         assert!(nif.meshes.is_empty());
     }
 
+    // ---- posing on a skeleton
+
+    fn xf52(t: [f32; 3]) -> Vec<u8> {
+        let mut o = vec![];
+        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+            f32le(&mut o, v);
+        }
+        for v in t {
+            f32le(&mut o, v);
+        }
+        f32le(&mut o, 1.0);
+        o
+    }
+
+    /// A skinned shape of three vertices on bones A and B, in a model whose own bones are both at
+    /// the origin: vertex 0 is all A, vertex 1 all B, vertex 2 half and half.
+    fn skinned_model() -> Vec<u8> {
+        let verts: [([f32; 3], [u16; 4], [u8; 4]); 3] = [
+            ([0.0, 0.0, 0.0], [0x3C00, 0, 0, 0], [0, 0, 0, 0]),
+            ([1.0, 0.0, 0.0], [0x3C00, 0, 0, 0], [1, 0, 0, 0]),
+            ([0.0, 1.0, 0.0], [0x3800, 0x3800, 0, 0], [0, 1, 0, 0]),
+        ];
+        let desc: u64 = 7 | (4 << 28) | (0x41 << 44); // position and skin data: 16 + 12 bytes
+        let mut stream = vec![];
+        for (p, w, b) in verts {
+            for c in p {
+                f32le(&mut stream, c);
+            }
+            f32le(&mut stream, 0.0);
+            for h in w {
+                stream.extend_from_slice(&h.to_le_bytes());
+            }
+            stream.extend_from_slice(&b);
+        }
+        let mut partition = vec![];
+        u32le(&mut partition, 1);
+        u32le(&mut partition, stream.len() as u32);
+        u32le(&mut partition, 28);
+        partition.extend_from_slice(&desc.to_le_bytes());
+        partition.extend_from_slice(&stream);
+        for v in [3u16, 1, 2, 0, 0] {
+            partition.extend_from_slice(&v.to_le_bytes()); // vertices, triangles, bones, strips, weights per vertex
+        }
+        for b in [0u16, 1] {
+            partition.extend_from_slice(&b.to_le_bytes());
+        }
+        partition.extend_from_slice(&[0, 0, 1]); // no vertex map, no weights, has faces
+        for i in [0u16, 1, 2] {
+            partition.extend_from_slice(&i.to_le_bytes());
+        }
+        partition.push(0);
+        partition.extend_from_slice(&[0, 0]);
+        partition.extend_from_slice(&0u64.to_le_bytes());
+        for i in [0u16, 1, 2] {
+            partition.extend_from_slice(&i.to_le_bytes());
+        }
+        let mut instance = vec![];
+        instance.extend_from_slice(&5i32.to_le_bytes()); // skin data
+        instance.extend_from_slice(&6i32.to_le_bytes()); // partition
+        instance.extend_from_slice(&0i32.to_le_bytes()); // skeleton root
+        u32le(&mut instance, 2);
+        instance.extend_from_slice(&1i32.to_le_bytes());
+        instance.extend_from_slice(&2i32.to_le_bytes());
+        u32le(&mut instance, 0);
+        let mut data = xf52([0.0; 3]);
+        u32le(&mut data, 2);
+        data.push(0);
+        for _ in 0..2 {
+            data.extend(xf52([0.0; 3])); // bind: the bones are at the origin
+            data.extend_from_slice(&[0u8; 16]);
+            data.extend_from_slice(&0u16.to_le_bytes());
+        }
+        file(
+            100,
+            &["Root", "BoneA", "BoneB", "Shape"],
+            &[
+                ("NiNode", ni_node(0, [0.0; 3], &[1, 2, 3], None)),
+                ("NiNode", ni_node(1, [0.0; 3], &[], None)),
+                ("NiNode", ni_node(2, [0.0; 3], &[], None)),
+                ("BSTriShape", bs_tri_shape_block(3, [0.0; 3], 4, -1, -1, false)),
+                ("BSDismemberSkinInstance", instance),
+                ("NiSkinData", data),
+                ("NiSkinPartition", partition),
+            ],
+        )
+    }
+
+    /// A model that is only a skeleton: bone A at `a`, bone B at the origin.
+    fn skeleton_model(a: [f32; 3]) -> Vec<u8> {
+        file(
+            100,
+            &["Root", "BoneA", "BoneB"],
+            &[
+                ("NiNode", ni_node(0, [0.0; 3], &[1, 2], None)),
+                ("NiNode", ni_node(1, a, &[], None)),
+                ("NiNode", ni_node(2, [0.0; 3], &[], None)),
+            ],
+        )
+    }
+
+    #[test]
+    fn posing_moves_each_vertex_by_its_bones_in_the_skeleton() {
+        let nif = parse(&skinned_model()).unwrap();
+        assert!(nif.warnings.is_empty(), "{:?}", nif.warnings);
+        let mesh = &nif.meshes[0];
+        let skin = mesh.skin.as_ref().expect("skin data is read");
+        assert_eq!(skin.bone_names().collect::<Vec<_>>(), ["BoneA", "BoneB"]);
+        assert_eq!(mesh.positions, [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], "stored pose");
+
+        // The game's skeleton has bone A 10 forward: vertices on A move with it, B's stay, half and half moves half.
+        let skeleton = Skeleton::from_nif(&parse(&skeleton_model([0.0, 10.0, 0.0])).unwrap());
+        assert_eq!(skeleton.len(), 3);
+        let posed = mesh.pose(&skeleton);
+        assert_eq!(posed.positions, [[0.0, 10.0, 0.0], [1.0, 0.0, 0.0], [0.0, 6.0, 0.0]]);
+
+        // A skeleton equal to the model's own leaves it as stored (bone names match in any case).
+        let same = Skeleton::from_nif(&parse(&skeleton_model([0.0; 3])).unwrap());
+        assert_eq!(mesh.pose(&same).positions, mesh.positions);
+        // A bone the skeleton lacks falls back to the model's own.
+        let only_a = Skeleton { bones: [("bonea".to_string(), Transform { t: [0.0, 10.0, 0.0], ..Transform::IDENT })].into() };
+        assert_eq!(mesh.pose(&only_a).positions, posed.positions);
+        assert!(only_a.bone("BONEA").is_some() && only_a.bone("nothing").is_none());
+        // Posing leaves everything but the vertices alone, and unskinned shapes pass through.
+        assert_eq!(posed.triangles, mesh.triangles);
+        let flat = Mesh { positions: vec![[1.0, 2.0, 3.0]], ..Mesh::default() };
+        assert_eq!(flat.pose(&skeleton).positions, flat.positions);
+    }
+
     /// Whatever is done to a valid file, parsing must return, not panic or allocate wildly.
     #[test]
     fn damaged_files_never_panic() {
@@ -1275,5 +1615,92 @@ pub(crate) mod tests {
             .find(|e| e.file_name().eq_ignore_ascii_case("meshes"))
             .map(|e| e.file_name().into())
             .unwrap_or_else(|| "meshes".into())
+    }
+
+    /// Read-only run over a real install (skipped unless `SKYPLUG_TEST_GAME_DIR` is set): every
+    /// skinned shape, posed on its own bones (must come out as stored) and on the game's female
+    /// skeleton (what moves, and by how much).
+    #[test]
+    fn real_install_posing() {
+        use crate::GamePaths;
+        use crate::steam::{DEFAULT_APPID, GameInstall};
+        let Some(dir) = std::env::var_os("SKYPLUG_TEST_GAME_DIR") else {
+            eprintln!("SKYPLUG_TEST_GAME_DIR not set; skipping");
+            return;
+        };
+        let prefix = std::env::var_os("SKYPLUG_TEST_PREFIX").map(std::path::PathBuf::from);
+        let paths = GamePaths::new(&GameInstall::new(std::path::PathBuf::from(dir), prefix).unwrap(), DEFAULT_APPID);
+        let resolver = paths.asset_resolver().unwrap();
+        let skeleton_bytes = resolver.read_asset("meshes/actors/character/character assets female/skeleton_female.nif").unwrap().expect("the game's skeleton");
+        let skeleton = Skeleton::from_nif(&parse(&skeleton_bytes).unwrap());
+        eprintln!("skeleton_female.nif: {} named nodes", skeleton.len());
+
+        // The models armours are worn as: what the preview poses. (Every NIF would include
+        // animated props and creatures, whose bones are driven by animation, not a bind pose.)
+        let catalog = crate::armour::ArmourCatalog::for_game(&paths).unwrap();
+        let mut names: Vec<String> = vec![];
+        for (plugin, _) in catalog.plugins_with_armours() {
+            for a in catalog.armours_in(&plugin, Some(&resolver)).unwrap() {
+                names.extend(a.models);
+            }
+        }
+        // Creature skins are armour records too, but they hang on their own skeletons.
+        names.retain(|n| !n.starts_with("meshes/actors/") || n.starts_with("meshes/actors/character/"));
+        names.sort();
+        names.dedup();
+        eprintln!("{} worn models", names.len());
+        let shift = |a: &[[f32; 3]], b: &[[f32; 3]]| a.iter().zip(b).map(|(p, q)| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()).fold(0f32, f32::max);
+        let (mut skinned, mut own_off, mut moved) = (0, 0, 0);
+        let mut by_shift: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut examples = vec![];
+        let mut own_examples: Vec<String> = vec![];
+        let mut own_kinds: std::collections::BTreeMap<String, usize> = Default::default();
+        for name in &names {
+            let Ok(Some(bytes)) = resolver.read_asset(name) else { continue };
+            let Ok(nif) = parse(&bytes) else { continue };
+            let own = Skeleton::from_nif(&nif);
+            for m in nif.meshes.iter().filter(|m| m.skin.is_some()) {
+                skinned += 1;
+                let own_shift = shift(&m.pose(&own).positions, &m.positions);
+                if own_shift > 0.01 {
+                    own_off += 1;
+                    let skin = m.skin.as_ref().unwrap();
+                    let lacking = skin.bone_names().filter(|b| own.bone(b).is_none()).count();
+                    let kind = "other";
+                    *own_kinds.entry(format!("{kind}, {} of {} bones not in the file", if lacking == 0 { "none".to_string() } else { "some".to_string() }, skin.bone_names().count())).or_default() += 1;
+                    if own_examples.len() < 14 && kind == "other" {
+                        own_examples.push(format!("{name} '{}' off by {own_shift:.2} ({lacking} bones not in file)", m.name));
+                    }
+                }
+                let d = shift(&m.pose(&skeleton).positions, &m.positions);
+                assert!(d.is_finite(), "{name}: '{}' posed to a non-finite position", m.name);
+                if d > 0.01 {
+                    moved += 1;
+                    *by_shift.entry(format!("{:.1}", d)).or_default() += 1;
+                    if examples.len() < 6 && !name.to_ascii_lowercase().contains("actors") {
+                        examples.push(format!("{name} '{}' moves {d:.2}", m.name));
+                    }
+                }
+            }
+        }
+        eprintln!("{skinned} skinned shapes: {own_off} don't come out as stored when posed on their own bones; {moved} move on the game's skeleton");
+        let mut kinds: Vec<_> = own_kinds.into_iter().collect();
+        kinds.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        for (k, n) in kinds.iter().take(6) {
+            eprintln!("  not reproduced on own bones ({k}): {n}");
+        }
+        for e in &own_examples {
+            eprintln!("    e.g. {e}");
+        }
+        let mut top: Vec<_> = by_shift.into_iter().collect();
+        top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        eprintln!("  most common moves (units): {:?}", &top[..top.len().min(8)]);
+        for e in &examples {
+            eprintln!("  e.g. {e}");
+        }
+        // Posed on its own bones a worn model comes out as stored, except effects and animated
+        // attachments (about 5% on the GOG install); a bigger share means the maths regressed.
+        assert!(skinned > 1000);
+        assert!(own_off * 12 < skinned, "posing on a model's own bones should reproduce it: {own_off} of {skinned} don't");
     }
 }

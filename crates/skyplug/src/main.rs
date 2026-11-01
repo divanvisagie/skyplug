@@ -4,9 +4,12 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
+use skyplug_core::armour::{self, ArmourCatalog};
+use skyplug_core::assets::AssetResolver;
 use skyplug_core::plugins::{self, ChangeResult, State};
+use skyplug_core::{nif, render};
 use skyplug_core::{GameInstall, GamePaths, saves, steam};
 
 /// Scan and toggle Skyrim Special Edition plugins on Linux, Steam or GOG.
@@ -60,6 +63,20 @@ enum Command {
     /// List the plugins that were active in a specific save (exact
     /// filename, filename without `.ess`, or a substring).
     SavePlugins { save: String },
+    /// List the armours in the load order: the plugins that have some, or one plugin's armours
+    /// with the models they are worn as.
+    Armours {
+        /// A plugin file name. Omit to list the plugins that have armour records.
+        plugin: Option<String>,
+        /// Only armours whose name or editor ID contains this (any case).
+        #[arg(long)]
+        filter: Option<String>,
+        /// Also read each model and say which the game won't draw (a skin partition on a slot the armour isn't worn on).
+        #[arg(long)]
+        check: bool,
+    },
+    /// Render a model with its textures to a PNG, and say where each texture comes from.
+    Preview(PreviewArgs),
     /// Print the skyplug(1) manual page.
     Man {
         /// Write it under ../share/man/man1 next to the skyplug binary
@@ -67,6 +84,41 @@ enum Command {
         #[arg(long)]
         install: bool,
     },
+}
+
+#[derive(Args)]
+struct PreviewArgs {
+    /// The model: a game path such as `meshes/armor/iron/f/cuirass_1.nif`, or a `.nif` file on disk.
+    model: String,
+    /// Where to write the PNG (all views side by side).
+    #[arg(short, long, default_value = "preview.png")]
+    out: PathBuf,
+    /// Views to draw, comma separated: front, three-quarter, right, back, left, or an angle in degrees
+    /// (0 is the front, 90 the character's right).
+    #[arg(long, value_delimiter = ',', default_value = "front,three-quarter,right,back")]
+    views: Vec<String>,
+    /// Width and height of each view, in pixels.
+    #[arg(long, default_value_t = 480)]
+    size: usize,
+    /// Also draw the installed female body, for scale.
+    #[arg(long)]
+    body: bool,
+    /// Draw another model too (a game path or a file); can be repeated.
+    #[arg(long = "with")]
+    with: Vec<String>,
+    /// Draw an armour by name or editor ID, as the load order wears it; can be repeated. The model
+    /// argument may then be left as `-`.
+    #[arg(long)]
+    armour: Vec<String>,
+    /// Degrees above the horizon.
+    #[arg(long, default_value_t = 6.0)]
+    elevation: f32,
+    /// 1 fits the whole model; larger zooms in.
+    #[arg(long, default_value_t = 1.0)]
+    zoom: f32,
+    /// A transparent background instead of dark grey.
+    #[arg(long)]
+    transparent: bool,
 }
 
 const MAN_PAGE: &str = include_str!("../man/skyplug.1");
@@ -252,6 +304,149 @@ fn cmd_save_plugins(resolved: &GamePaths, save: &str) -> Result<()> {
     Ok(())
 }
 
+fn view_angle(name: &str) -> Result<f32> {
+    Ok(match name {
+        "front" => 0.0,
+        "three-quarter" => 35.0,
+        "right" => 90.0,
+        "back" => 180.0,
+        "left" => 270.0,
+        other => other.parse().with_context(|| format!("unknown view {other:?} (use front, three-quarter, right, back, left or an angle)"))?,
+    })
+}
+
+/// Read a model from a file on disk if there is one, else from the game's assets.
+fn load_model(resolver: &AssetResolver, name: &str) -> Result<Option<render::Model>> {
+    let max_texture = 1024;
+    let path = std::path::Path::new(name);
+    if path.is_file() {
+        let nif = nif::parse(&std::fs::read(path)?).with_context(|| format!("reading {name}"))?;
+        return Ok(Some(render::Model::load(resolver, &nif, max_texture)));
+    }
+    render::Model::from_asset(resolver, name, max_texture).with_context(|| format!("reading {name}"))
+}
+
+/// The armour `text` names: an exact name or editor ID if there is one, else the first
+/// match; an error listing candidates if nothing matches.
+fn find_armour(catalog: &ArmourCatalog, resolver: &AssetResolver, text: &str) -> Result<armour::Armour> {
+    let found = catalog.search(text, Some(resolver));
+    let exact = found.iter().position(|a| a.editor_id.eq_ignore_ascii_case(text) || a.label().eq_ignore_ascii_case(text));
+    match exact.or(if found.is_empty() { None } else { Some(0) }) {
+        Some(i) => {
+            if exact.is_none() && found.len() > 1 {
+                let others: Vec<_> = found.iter().skip(1).take(4).map(|a| a.label()).collect();
+                eprintln!("note: {} armours match {text:?}; using {:?} (others: {})", found.len(), found[0].label(), others.join(", "));
+            }
+            Ok(found[i].clone())
+        }
+        None => anyhow::bail!("no armour matches {text:?} (see `skyplug armours`)"),
+    }
+}
+
+fn cmd_armours(resolved: &GamePaths, plugin: Option<&str>, filter: Option<&str>, check: bool) -> Result<()> {
+    let catalog = ArmourCatalog::for_game(resolved)?;
+    for p in catalog.problems() {
+        eprintln!("warning: {p}");
+    }
+    let Some(plugin) = plugin else {
+        for (name, n) in catalog.plugins_with_armours() {
+            println!("{n:5}  {name}");
+        }
+        return Ok(());
+    };
+    let resolver = resolved.asset_resolver()?;
+    let needle = filter.map(str::to_lowercase);
+    let armours = catalog.armours_in(plugin, Some(&resolver))?;
+    for a in armours.iter().filter(|a| needle.as_ref().is_none_or(|n| a.label().to_lowercase().contains(n) || a.editor_id.to_lowercase().contains(n))) {
+        let change = if a.is_override() { format!("  (changes {})", a.defined_in) } else { String::new() };
+        println!("{}  [{}]  {}{change}", a.label(), a.editor_id, a.slot_names().join(", "));
+        for m in &a.models {
+            println!("    {m}");
+        }
+        if a.models.is_empty() {
+            println!("    (no models)");
+        }
+        if check {
+            for problem in a.visibility_problems(&resolver) {
+                println!("    ! {problem}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_preview(resolved: &GamePaths, a: &PreviewArgs) -> Result<()> {
+    let resolver = resolved.asset_resolver()?;
+    for w in resolver.warnings() {
+        eprintln!("warning: {w}");
+    }
+    let mut model = if a.model == "-" {
+        render::Model::default()
+    } else {
+        load_model(&resolver, &a.model)?.with_context(|| format!("{}: the game has no such file", a.model))?
+    };
+    if !a.armour.is_empty() {
+        let catalog = ArmourCatalog::for_game(resolved)?;
+        for text in &a.armour {
+            let armour = find_armour(&catalog, &resolver, text)?;
+            println!("armour {} ({}, from {}): {}", armour.label(), armour.editor_id, armour.plugin, armour.models.join(", "));
+            for problem in armour.visibility_problems(&resolver) {
+                println!("  WARNING: {problem}");
+            }
+            for m in &armour.models {
+                model.merge(load_model(&resolver, m)?.with_context(|| format!("{m}: the game has no such file"))?);
+            }
+        }
+    }
+    if a.body {
+        for asset in render::FEMALE_BODY {
+            match load_model(&resolver, asset)? {
+                Some(body) => model.merge_underlay(body),
+                None => eprintln!("note: no {asset} in this install"),
+            }
+        }
+    }
+    for extra in &a.with {
+        model.merge(load_model(&resolver, extra)?.with_context(|| format!("{extra}: the game has no such file"))?);
+    }
+    anyhow::ensure!(model.mesh_count() > 0, "{}: nothing to draw (no meshes it can read)", a.model);
+
+    println!("{} meshes", model.mesh_count());
+    for t in &model.textures {
+        match &t.result {
+            render::TextureResult::Found { source, hides } if hides.is_empty() => println!("  {} slot {}: {} <- {source}", t.mesh, t.slot, t.path),
+            render::TextureResult::Found { source, hides } => println!("  {} slot {}: {} <- {source} (hides {})", t.mesh, t.slot, t.path, hides.join(", ")),
+            render::TextureResult::Missing => println!("  {} slot {}: {} MISSING", t.mesh, t.slot, t.path),
+            render::TextureResult::Unreadable(why) => println!("  {} slot {}: {} UNREADABLE ({why})", t.mesh, t.slot, t.path),
+        }
+    }
+    for w in &model.warnings {
+        println!("warning: {w}");
+    }
+
+    let size = a.size.max(16);
+    let opts = render::Options { width: size, height: size, background: if a.transparent { [0, 0, 0, 0] } else { [38, 41, 50, 255] }, ..Default::default() };
+    let angles: Vec<f32> = a.views.iter().map(|v| view_angle(v)).collect::<Result<_>>()?;
+    anyhow::ensure!(!angles.is_empty(), "no views asked for");
+    let mut strip = vec![0u8; size * angles.len() * size * 4];
+    for (i, azimuth) in angles.iter().enumerate() {
+        let camera = render::Camera { azimuth: *azimuth, elevation: a.elevation, zoom: a.zoom };
+        let img = render::render(&model, &camera, &opts);
+        for y in 0..size {
+            let from = y * size * 4;
+            let to = (y * angles.len() * size + i * size) * 4;
+            strip[to..to + size * 4].copy_from_slice(&img.pixels[from..from + size * 4]);
+        }
+    }
+    let file = std::io::BufWriter::new(std::fs::File::create(&a.out).with_context(|| format!("creating {}", a.out.display()))?);
+    let mut enc = png::Encoder::new(file, (size * angles.len()) as u32, size as u32);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(&strip)?;
+    println!("wrote {}", a.out.display());
+    Ok(())
+}
+
 fn cmd_man(install: bool) -> Result<()> {
     if !install {
         std::io::stdout().write_all(MAN_PAGE.as_bytes())?;
@@ -288,6 +483,8 @@ fn main() -> Result<()> {
         Command::Characters => cmd_characters(&resolved),
         Command::Saves { character } => cmd_saves(&resolved, character),
         Command::SavePlugins { save } => cmd_save_plugins(&resolved, save),
+        Command::Armours { plugin, filter, check } => cmd_armours(&resolved, plugin.as_deref(), filter.as_deref(), *check),
+        Command::Preview(args) => cmd_preview(&resolved, args),
         Command::Man { .. } => unreachable!(),
     }
 }

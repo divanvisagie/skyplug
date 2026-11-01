@@ -138,6 +138,63 @@ List the plugins that were active when
 .Ar save
 was made, each marked against the current setup with the same markers as
 .Cm list .
+.It Cm armours Op Ar plugin Op Fl -filter Ar text Op Fl -check
+Without
+.Ar plugin ,
+list the plugins in the load order that have armour records, with how many.
+With one, list its armours: name, editor ID, the slots it covers, and the models it is worn as
+(for a female character, the human races), as the load order wears it: the last plugin that
+changes an armature decides, so a plugin that refits vanilla armours shows the refitted models.
+An armour a plugin only changes is marked with the plugin that adds it.
+.Fl -filter
+keeps armours whose name or editor ID contains
+.Ar text .
+.Fl -check
+also reads each armour's models and marks with
+.Sy !
+any the game won't draw: a skinned model records which slot each skin partition belongs to,
+and the game only draws a partition whose slot is among the slots of the armature wearing it,
+so moving an armour to another slot in its plugin without moving its model makes it
+invisible.
+.Cm preview Fl -armour
+warns about the same.
+.It Cm preview Ar model Op Fl o | Fl -out Ar file Op Fl -views Ar list Op Fl -size Ar pixels Op Fl -body Op Fl -with Ar model Op Fl -elevation Ar degrees Op Fl -zoom Ar factor Op Fl -transparent
+Draw
+.Ar model
+with its textures and write a PNG with the views side by side, and print where each
+texture came from (the loose file or archive the game uses, what it hides, or that it is
+missing).
+.Ar model
+is a game path such as
+.Pa meshes/armor/iron/f/cuirass_1.nif ,
+or a
+.Pa .nif
+file on disk.
+This is a software preview for checking shape, texture mapping and colours, not the
+game's renderer: no normal, specular or glow maps and no skin or hair tint.
+Skyrim LE models are refused.
+.Bl -tag -width Ds
+.It Fl -views Ar list
+Comma-separated views: front, three-quarter, right, back, left, or an angle in degrees.
+The default is front, three-quarter, right and back.
+.It Fl -size Ar pixels
+Width and height of each view; the default is 480.
+.It Fl -body
+Also draw the installed female body, hands and feet, for scale.
+.It Fl -with Ar model
+Draw another model as well; can be repeated.
+.It Fl -armour Ar text
+Draw an armour by name or editor ID, as the load order wears it; can be repeated.
+Use
+.Ar -
+as the model to draw only armours.
+.It Fl -elevation Ar degrees
+Camera height above the horizon; the default is 6.
+.It Fl -zoom Ar factor
+1 fits the whole model; larger zooms in.
+.It Fl -transparent
+Use a transparent background.
+.El
 .It Cm man Op Fl -install
 Print this manual page to standard output.
 With

@@ -2,7 +2,8 @@
 
 Library for working with a Skyrim Special Edition install, Steam's or
 GOG's, under Proton or Wine on Linux or on Windows itself: finding the game, reading and
-changing which plugins are active, and parsing `.ess` save files. It's the
+changing which plugins are active, parsing `.ess` save files, and reading
+the game's `.bsa` archives, `.dds` textures and `.nif` models. It's the
 shared core of the
 [`skyplug`](https://github.com/divanvisagie/skyplug) command-line tool,
 split out so other tools don't have to re-implement the same file formats.
@@ -30,6 +31,43 @@ decides how to present them.
   of plugins active when the save was written. Handles uncompressed and
   LZ4-compressed saves, and can read just the header cheaply.
 
+- **`bsa`** — reads Skyrim SE archives (version 105): the index on open, a
+  file's bytes on request (LZ4 handled), lookups by path in any case.
+  Read-only, and it refuses other versions and corrupt indexes instead of
+  guessing.
+- **`dds`** — decodes `.dds` textures to RGBA8, one mip level at a time:
+  BC1 to BC5, BC7 and uncompressed 8/24/32-bit, with a legacy or DX10 header.
+- **`nif`** — reads Skyrim SE models into meshes: positions, normals, UVs,
+  vertex colours, triangles, texture paths, alpha and double-sided flags,
+  with node transforms applied. Handles skinned shapes (geometry in
+  `NiSkinPartition`), the older `NiTriShape`, and switch nodes. Skyrim LE
+  models come back as a `LegacyFormat` error; unreadable blocks become
+  warnings and the rest still loads. No skeletons, animation, collision,
+  particles or face meshes yet.
+- **`records`** — reads plugin files: the header (flags, masters) and the
+  records of one top-level group at a time, with zlib-compressed bodies,
+  subrecords and FormIDs resolved to the plugin that defines them. Read-only.
+- **`armour`** — `ArmourCatalog`: the armours of a load order and the models
+  they're worn as. An armour only lists "armatures", and the last plugin in the
+  load order to change an armature decides its model, so a refit like UNP
+  Vanilla Outfits shows through. Names come from the plugin or, for the
+  localized base plugins, from their string tables. Models are the female ones
+  for the human races. `Armour::visibility_problems` reads each model and says
+  which shapes the game won't draw: it only draws a skin partition whose slot
+  is among the slots of the armature wearing it (`partition_problems`), so an
+  armour moved to another slot in its plugin without its model is invisible.
+- **`render`** — a small software renderer: a `Model` is meshes plus their
+  diffuse textures resolved through an `AssetResolver` (with a report of
+  where every texture came from, or that it's missing), and `render` draws it
+  from a `Camera` into RGBA with a z-buffer, backface culling, alpha test and
+  blend, and supersampling. For checking shape, mapping and colour, not the
+  game's shading.
+- **`assets`** — `AssetResolver` finds an asset the way the game does, and
+  says what it hides: loose files in `Data` first, then archives in load
+  order (the base game's from `Skyrim_Default.ini`, `Skyrim.ini` and
+  `SkyrimCustom.ini`, then each enabled plugin's `<name>.bsa` and
+  `<name> - Textures.bsa`), the later one winning.
+
 `GamePaths` ties these together: resolve every path once, then ask it
 for the merged plugin status.
 
@@ -55,6 +93,26 @@ fn main() -> anyhow::Result<()> {
     let list = saves::list_saves(&paths.saves_dir)?;
     for character in saves::characters(&list.entries) {
         println!("{}: {} saves", character.name, character.save_count);
+    }
+
+    // Which file does the game use for a texture, and what does it hide?
+    let assets = paths.asset_resolver()?;
+    if let Some(found) = assets.resolve("textures/armor/iron/ironarmor.dds") {
+        println!("uses {}", assets.describe(&found.winner));
+        for hidden in &found.shadowed {
+            println!("  hides {}", assets.describe(hidden));
+        }
+        let texture = assets.read(&found.winner)?;
+        let dds = skyplug_core::dds::Dds::parse(&texture)?;
+        let small = dds.decode(dds.level_for(256))?; // RGBA8, about 256 px
+        println!("{}x{}", small.width, small.height);
+    }
+
+    // Read a model and the textures it names.
+    if let Some(model) = assets.read_asset("meshes/armor/iron/f/cuirass_1.nif")? {
+        for mesh in skyplug_core::nif::parse(&model)?.meshes {
+            println!("{}: {} triangles, diffuse {:?}", mesh.name, mesh.triangles.len(), mesh.texture(0));
+        }
     }
 
     // Parse a save you already have in memory (e.g. from a file picker)...
@@ -95,3 +153,28 @@ game directory either way.
 ## License
 
 BSD-3-Clause
+
+## Testing against a real install
+
+The unit tests build their own archives and textures. To check the readers
+against a real install (read only), point a test at it:
+
+```sh
+SKYPLUG_TEST_GAME_DIR="/path/to/Skyrim Special Edition" \
+SKYPLUG_TEST_PREFIX=/path/to/wine/prefix \
+cargo test -p skyplug-core --release real_install -- --nocapture
+```
+
+It opens every archive, looks every entry up by its own path, reads and
+decompresses a sample, and decodes the textures in it. `real_install_meshes`
+does the same for models: it parses every `.nif`, loose and in archives, and
+prints how many parsed, were LE, warned, and which block types are unhandled.
+
+`real_install_renders` renders a sample of every model with its textures, and
+`real_install_armours` reads every enabled plugin's armours and checks that each
+model they name exists.
+`skyplug preview` (in the `skyplug` crate) is the command-line front end to
+`render`. Two examples help when looking at one file: `cargo run --example resolve --
+<game dir> [--prefix <prefix>] <asset path> [--out <file>]` shows where one
+asset comes from, and `cargo run --example nifinfo -- <file.nif> [--obj
+<out.obj>]` summarises a model and can write it as an OBJ.

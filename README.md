@@ -34,9 +34,39 @@ skyplug characters                # list every character across all saves
 skyplug saves <character>         # list a character's saves (name or substring)
 skyplug save-plugins <save>       # list the plugins active in a specific save
 
+skyplug armours                   # the plugins that have armour records
+skyplug armours <plugin>          # a plugin's armours and the models they're worn as
+skyplug armours <plugin> --check  # ...and mark models the game won't draw (slot mismatch)
+
+skyplug preview <model>           # render a model with its textures to a PNG, and say
+                                  # which file each texture comes from (see below)
+
 skyplug man                       # print the skyplug(1) man page
 skyplug man --install             # install it next to the binary (see below)
 ```
+
+### `preview`
+
+```sh
+skyplug preview meshes/armor/iron/f/cuirass_1.nif --body -o iron.png
+skyplug preview meshes/a.nif --with meshes/b.nif --with meshes/c.nif   # a whole outfit
+skyplug preview ~/work/mymod.nif --views front,back --size 700         # a file on disk
+skyplug preview - --armour "Northgirl Knit Jumper" --armour "Northgirl Trousers"   # by name
+```
+
+Draws the model from several sides into one PNG and lists every texture it
+uses, as the game resolves them: the loose file or archive that wins, what it
+hides, or `MISSING`. That answers "is my loose file being used?" without
+launching the game. `--body` adds the installed female body for scale;
+`--with` adds more pieces, and `--armour` picks an armour by name or editor ID
+from the load order (see `skyplug armours`), drawn as the load order wears it:
+a plugin that refits vanilla armours shows the refitted models.
+
+It's a software preview for checking shape, texture mapping and colour, not
+the game's renderer: no normal, specular or glow maps and no skin or hair
+tint. Bare-skin shapes bundled in armour files are drawn behind the clothes,
+as the game hides them. Skyrim LE models are refused, and face meshes aren't
+drawn.
 
 ### `edit` (TUI)
 

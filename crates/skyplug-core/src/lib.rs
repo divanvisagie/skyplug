@@ -4,7 +4,14 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+pub mod armour;
+pub mod assets;
+pub mod bsa;
+pub mod dds;
+pub mod nif;
 pub mod plugins;
+pub mod records;
+pub mod render;
 pub mod saves;
 pub mod steam;
 
@@ -39,6 +46,12 @@ impl GamePaths {
     /// Auto-detect the install owning `appid` and resolve its paths.
     pub fn detect(appid: &str) -> Result<Self> {
         Ok(Self::new(&steam::find_game_install(appid)?, appid))
+    }
+
+    /// A resolver that finds assets (meshes, textures) the way the game does:
+    /// see [`assets::AssetResolver::for_game`].
+    pub fn asset_resolver(&self) -> Result<assets::AssetResolver> {
+        assets::AssetResolver::for_game(self)
     }
 
     /// Scan Data, read Plugins.txt and Skyrim.ccc, and merge them into the

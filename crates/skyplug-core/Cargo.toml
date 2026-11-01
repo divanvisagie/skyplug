@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Skyrim Special Edition install discovery, Plugins.txt and .ess save parsing"
+description = "Skyrim Special Edition install discovery, Plugins.txt, .ess save parsing, and reading BSA archives and DDS textures"
 
 [dependencies]
 anyhow = "1"
 lz4_flex = "0.11"
 dirs = "7"
+bcdec_rs = "0.2"
+miniz_oxide = "0.8"

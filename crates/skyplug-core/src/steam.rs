@@ -443,6 +443,8 @@ mod tests {
         assert_eq!(native.documents_dir(), PathBuf::from("C:/Users/me/OneDrive/Documents/My Games/Skyrim Special Edition"));
     }
 
+    // A Linux path and Proton's prefix; Windows has its own folders (the layout test above).
+    #[cfg(not(windows))]
     #[test]
     fn from_game_dir_derives_library_root() {
         let install = GameInstall::from_game_dir("/mnt/lib/steamapps/common/Skyrim Special Edition").unwrap();

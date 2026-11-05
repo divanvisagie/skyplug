@@ -176,7 +176,8 @@ impl AssetResolver {
     /// file relative to `Data`, or the archive's file name.
     pub fn describe(&self, source: &Source) -> String {
         match source {
-            Source::Loose(p) => format!("loose: {}", p.strip_prefix(&self.data_dir).unwrap_or(p).display()),
+            // Game paths use `/` everywhere; on Windows the file's own path has `\`.
+            Source::Loose(p) => format!("loose: {}", p.strip_prefix(&self.data_dir).unwrap_or(p).to_string_lossy().replace('\\', "/")),
             Source::Archive { archive, .. } => self
                 .archives
                 .get(*archive)

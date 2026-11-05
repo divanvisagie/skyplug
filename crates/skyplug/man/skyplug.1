@@ -138,6 +138,13 @@ List the plugins that were active when
 .Ar save
 was made, each marked against the current setup with the same markers as
 .Cm list .
+.It Cm outfit Ar save
+List what the character wears in
+.Ar save :
+the armours the load order has for the worn items, with the slots they cover.
+Items made in game (enchanted or renamed copies) have no record in a plugin and are only counted,
+and a worn weapon or torch is shown as not armour.
+Only Special Edition saves can be read.
 .It Cm armours Op Ar plugin Op Fl -filter Ar text Op Fl -check
 Without
 .Ar plugin ,
@@ -187,6 +194,16 @@ Draw an armour by name or editor ID, as the load order wears it; can be repeated
 Use
 .Ar -
 as the model to draw only armours.
+.It Fl -outfit Ar save
+Draw what the character wears in
+.Ar save ,
+as
+.Cm outfit
+lists it.
+Use
+.Ar -
+as the model to draw only the outfit.
+A worn model the renderer can't read (a Skyrim LE one) is skipped with a warning.
 .It Fl -elevation Ar degrees
 Camera height above the horizon; the default is 6.
 .It Fl -zoom Ar factor

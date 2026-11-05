@@ -82,18 +82,18 @@ pub struct SaveEntry {
     pub header: SaveHeader,
 }
 
-fn read_u8(buf: &[u8], pos: usize) -> Result<(u8, usize)> {
+pub(crate) fn read_u8(buf: &[u8], pos: usize) -> Result<(u8, usize)> {
     let b = *buf.get(pos).context("unexpected end of save data")?;
     Ok((b, pos + 1))
 }
 
-fn read_u16(buf: &[u8], pos: usize) -> Result<(u16, usize)> {
+pub(crate) fn read_u16(buf: &[u8], pos: usize) -> Result<(u16, usize)> {
     let end = pos + 2;
     let chunk = buf.get(pos..end).context("unexpected end of save data")?;
     Ok((u16::from_le_bytes(chunk.try_into().unwrap()), end))
 }
 
-fn read_u32(buf: &[u8], pos: usize) -> Result<(u32, usize)> {
+pub(crate) fn read_u32(buf: &[u8], pos: usize) -> Result<(u32, usize)> {
     let end = pos + 4;
     let chunk = buf.get(pos..end).context("unexpected end of save data")?;
     Ok((u32::from_le_bytes(chunk.try_into().unwrap()), end))
@@ -104,14 +104,14 @@ fn read_f32(buf: &[u8], pos: usize) -> Result<(f32, usize)> {
     Ok((f32::from_bits(bits), end))
 }
 
-fn read_bytes(buf: &[u8], pos: usize, len: usize) -> Result<(&[u8], usize)> {
+pub(crate) fn read_bytes(buf: &[u8], pos: usize, len: usize) -> Result<(&[u8], usize)> {
     let end = pos + len;
     let chunk = buf.get(pos..end).context("unexpected end of save data")?;
     Ok((chunk, end))
 }
 
 /// A length-prefixed (u16) string, as used throughout the save format.
-fn read_wstring(buf: &[u8], pos: usize) -> Result<(String, usize)> {
+pub(crate) fn read_wstring(buf: &[u8], pos: usize) -> Result<(String, usize)> {
     let (len, pos) = read_u16(buf, pos)?;
     let (chunk, end) = read_bytes(buf, pos, len as usize)?;
     Ok((String::from_utf8_lossy(chunk).into_owned(), end))
@@ -176,9 +176,18 @@ pub fn parse_header(buf: &[u8]) -> Result<SaveHeader> {
     Ok(read_header(block, 0)?.0)
 }
 
-/// Parse a whole save held in memory: header, screenshot, and (after
-/// decompressing the body if needed) the plugin list.
-pub fn parse_save(buf: &[u8]) -> Result<SaveFile> {
+/// A save split into its parts: the header, the screenshot, and the body (decompressed if needed).
+pub(crate) struct Opened<'a> {
+    pub header: SaveHeader,
+    pub screenshot: &'a [u8],
+    pub body: std::borrow::Cow<'a, [u8]>,
+    /// What the offsets in the body's file location table count from: the start of the body
+    /// in the file, less the two size fields an SE save puts before a compressed body (the
+    /// offsets are as if they weren't there). Subtract it from an offset to index `body`.
+    pub body_start: usize,
+}
+
+pub(crate) fn open(buf: &[u8]) -> Result<Opened<'_>> {
     let header_size = read_prefix(buf)? as usize;
     let (block, pos) = read_bytes(buf, PREFIX_LEN, header_size)?;
     let (header, _) = read_header(block, 0)?;
@@ -194,16 +203,22 @@ pub fn parse_save(buf: &[u8]) -> Result<SaveFile> {
     };
 
     let body = &buf[pos..];
-    let decompressed;
-    let body: &[u8] = match header.compression_type {
-        0 => body,
-        2 => {
-            decompressed = lz4_flex::block::decompress(body, uncompressed_length as usize)
-                .context("decompressing save body (lz4)")?;
-            &decompressed
-        }
+    let body = match header.compression_type {
+        0 => std::borrow::Cow::Borrowed(body),
+        2 => std::borrow::Cow::Owned(
+            lz4_flex::block::decompress(body, uncompressed_length as usize).context("decompressing save body (lz4)")?,
+        ),
         other => bail!("unsupported save compression type {other}"),
     };
+    let body_start = if header.is_se { pos - 8 } else { pos };
+    Ok(Opened { header, screenshot, body, body_start })
+}
+
+/// Parse a whole save held in memory: header, screenshot, and (after
+/// decompressing the body if needed) the plugin list.
+pub fn parse_save(buf: &[u8]) -> Result<SaveFile> {
+    let Opened { header, screenshot, body, .. } = open(buf)?;
+    let body: &[u8] = &body;
 
     let (form_version, pos) = read_u8(body, 0)?;
     let (_plugin_info_size, pos) = read_u32(body, pos)?;

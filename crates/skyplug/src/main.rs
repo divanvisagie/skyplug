@@ -63,6 +63,9 @@ enum Command {
     /// List the plugins that were active in a specific save (exact
     /// filename, filename without `.ess`, or a substring).
     SavePlugins { save: String },
+    /// List what a character wears in a save: the armours the load order has for the worn items
+    /// (exact filename, filename without `.ess`, or a substring, as for `save-plugins`).
+    Outfit { save: String },
     /// List the armours in the load order: the plugins that have some, or one plugin's armours
     /// with the models they are worn as.
     Armours {
@@ -110,6 +113,10 @@ struct PreviewArgs {
     /// argument may then be left as `-`.
     #[arg(long)]
     armour: Vec<String>,
+    /// Draw what the character wears in a save (as for `skyplug outfit`). The model argument may
+    /// then be left as `-`.
+    #[arg(long)]
+    outfit: Option<String>,
     /// Degrees above the horizon.
     #[arg(long, default_value_t = 6.0)]
     elevation: f32,
@@ -278,6 +285,27 @@ fn cmd_saves(resolved: &GamePaths, character: &str) -> Result<()> {
     Ok(())
 }
 
+fn cmd_outfit(resolved: &GamePaths, save: &str) -> Result<()> {
+    let entries = list_saves(resolved)?;
+    let entry = saves::resolve_save(save, &entries)?;
+    let outfit = skyplug_core::outfit::read_outfit_from_file(&entry.path)?;
+    let catalog = ArmourCatalog::for_game(resolved)?;
+    let resolver = resolved.asset_resolver()?;
+    let keys: Vec<_> = outfit.worn.iter().map(|w| w.key.clone()).collect();
+    let armours = catalog.armours_for(&keys, Some(&resolver));
+    println!("{} wears {} items in {}", entry.header.player_name, keys.len(), entry.file_name);
+    for key in &keys {
+        match armours.iter().find(|a| a.key == *key) {
+            Some(a) => println!("{}  [{}]  {}  {}", a.label(), a.editor_id, a.slot_names().join(", "), a.plugin),
+            None => println!("(not armour: a weapon, torch or the like)  {}:{:06X}", key.plugin, key.id),
+        }
+    }
+    if outfit.skipped > 0 {
+        println!("{} worn items were made in game (enchanted or renamed) and can't be shown", outfit.skipped);
+    }
+    Ok(())
+}
+
 fn cmd_save_plugins(resolved: &GamePaths, save: &str) -> Result<()> {
     let entries = list_saves(resolved)?;
     let entry = saves::resolve_save(save, &entries)?;
@@ -396,16 +424,32 @@ fn cmd_preview(resolved: &GamePaths, a: &PreviewArgs) -> Result<()> {
     } else {
         load_model(&resolver, &a.model)?.with_context(|| format!("{}: the game has no such file", a.model))?
     };
-    if !a.armour.is_empty() {
+    if !a.armour.is_empty() || a.outfit.is_some() {
         let catalog = ArmourCatalog::for_game(resolved)?;
+        let mut chosen = Vec::new();
         for text in &a.armour {
-            let armour = find_armour(&catalog, &resolver, text)?;
+            chosen.push((find_armour(&catalog, &resolver, text)?, true));
+        }
+        if let Some(save) = &a.outfit {
+            let entries = list_saves(resolved)?;
+            let entry = saves::resolve_save(save, &entries)?;
+            let worn = skyplug_core::outfit::read_outfit_from_file(&entry.path)?;
+            let keys: Vec<_> = worn.worn.iter().map(|w| w.key.clone()).collect();
+            // A save's outfit is what it is: a model that can't be read is skipped, not fatal.
+            chosen.extend(catalog.armours_for(&keys, Some(&resolver)).into_iter().map(|armour| (armour, false)));
+        }
+        for (armour, asked) in chosen {
             println!("armour {} ({}, from {}): {}", armour.label(), armour.editor_id, armour.plugin, armour.models.join(", "));
             for problem in armour.visibility_problems(&resolver) {
                 println!("  WARNING: {problem}");
             }
             for (m, alts) in armour.models.iter().zip(&armour.alt_textures) {
-                model.merge(load_with_swaps(&resolver, m, alts)?.with_context(|| format!("{m}: the game has no such file"))?);
+                let loaded = load_with_swaps(&resolver, m, alts).and_then(|l| l.with_context(|| format!("{m}: the game has no such file")));
+                match loaded {
+                    Ok(part) => model.merge(part),
+                    Err(e) if asked => return Err(e),
+                    Err(e) => println!("  WARNING: skipped {m}: {e:#}"),
+                }
             }
         }
     }
@@ -503,6 +547,7 @@ fn main() -> Result<()> {
         Command::Characters => cmd_characters(&resolved),
         Command::Saves { character } => cmd_saves(&resolved, character),
         Command::SavePlugins { save } => cmd_save_plugins(&resolved, save),
+        Command::Outfit { save } => cmd_outfit(&resolved, save),
         Command::Armours { plugin, filter, check } => cmd_armours(&resolved, plugin.as_deref(), filter.as_deref(), *check),
         Command::Preview(args) => cmd_preview(&resolved, args),
         Command::Man { .. } => unreachable!(),

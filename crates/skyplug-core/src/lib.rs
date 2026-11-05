@@ -9,6 +9,7 @@ pub mod assets;
 pub mod bsa;
 pub mod dds;
 pub mod nif;
+pub mod outfit;
 pub mod plugins;
 pub mod records;
 pub mod render;

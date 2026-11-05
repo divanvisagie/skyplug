@@ -247,6 +247,25 @@ impl ArmourCatalog {
         found
     }
 
+    /// The armour each of `keys` names, as the load order has it (the last plugin to change a
+    /// record wins), in the order of `keys`; a key no plugin has an armour record for is left out.
+    pub fn armours_for(&self, keys: &[FormKey], resolver: Option<&AssetResolver>) -> Vec<Armour> {
+        let mut found: Vec<Option<Armour>> = vec![None; keys.len()];
+        for (name, _) in self.plugins_with_armours().into_iter().rev() {
+            if found.iter().all(Option::is_some) {
+                break;
+            }
+            for a in self.armours_in(&name, resolver).unwrap_or_default() {
+                for (slot, key) in found.iter_mut().zip(keys) {
+                    if slot.is_none() && a.key == *key {
+                        *slot = Some(a.clone());
+                    }
+                }
+            }
+        }
+        found.into_iter().flatten().collect()
+    }
+
     fn defined_in(&self, key: &FormKey) -> String {
         self.plugins.iter().find(|p| p.name.eq_ignore_ascii_case(&key.plugin)).map_or_else(|| key.plugin.clone(), |p| p.name.clone())
     }

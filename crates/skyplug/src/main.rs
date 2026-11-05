@@ -4,9 +4,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use skyplug_core::armour::{self, ArmourCatalog};
+use skyplug_core::armour::{self, ArmourCatalog, BodySex};
 use skyplug_core::assets::AssetResolver;
 use skyplug_core::plugins::{self, ChangeResult, State};
 use skyplug_core::{nif, render};
@@ -77,6 +77,9 @@ enum Command {
         /// Also read each model and say which the game won't draw (a skin partition on a slot the armour isn't worn on).
         #[arg(long)]
         check: bool,
+        /// List the models worn on this body: female (the default) or male.
+        #[arg(long, value_enum)]
+        sex: Option<SexArg>,
     },
     /// Render a model with its textures to a PNG, and say where each texture comes from.
     Preview(PreviewArgs),
@@ -87,6 +90,22 @@ enum Command {
         #[arg(long)]
         install: bool,
     },
+}
+
+/// Which body to draw armours on.
+#[derive(Clone, Copy, ValueEnum)]
+enum SexArg {
+    Female,
+    Male,
+}
+
+impl From<SexArg> for BodySex {
+    fn from(s: SexArg) -> Self {
+        match s {
+            SexArg::Female => BodySex::Female,
+            SexArg::Male => BodySex::Male,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -117,6 +136,10 @@ struct PreviewArgs {
     /// then be left as `-`.
     #[arg(long)]
     outfit: Option<String>,
+    /// The body to draw armours on, and its skeleton: female or male. Female unless `--outfit` names
+    /// a save of a man.
+    #[arg(long, value_enum)]
+    sex: Option<SexArg>,
     /// Degrees above the horizon.
     #[arg(long, default_value_t = 6.0)]
     elevation: f32,
@@ -382,7 +405,7 @@ fn find_armour(catalog: &ArmourCatalog, resolver: &AssetResolver, text: &str) ->
     }
 }
 
-fn cmd_armours(resolved: &GamePaths, plugin: Option<&str>, filter: Option<&str>, check: bool) -> Result<()> {
+fn cmd_armours(resolved: &GamePaths, plugin: Option<&str>, filter: Option<&str>, check: bool, sex: BodySex) -> Result<()> {
     let catalog = ArmourCatalog::for_game(resolved)?;
     for p in catalog.problems() {
         eprintln!("warning: {p}");
@@ -399,14 +422,15 @@ fn cmd_armours(resolved: &GamePaths, plugin: Option<&str>, filter: Option<&str>,
     for a in armours.iter().filter(|a| needle.as_ref().is_none_or(|n| a.label().to_lowercase().contains(n) || a.editor_id.to_lowercase().contains(n))) {
         let change = if a.is_override() { format!("  (changes {})", a.defined_in) } else { String::new() };
         println!("{}  [{}]  {}{change}", a.label(), a.editor_id, a.slot_names().join(", "));
-        for m in &a.models {
+        let set = a.models_for(sex);
+        for m in &set.models {
             println!("    {m}");
         }
-        if a.models.is_empty() {
+        if set.models.is_empty() {
             println!("    (no models)");
         }
         if check {
-            for problem in a.visibility_problems(&resolver) {
+            for problem in a.visibility_problems(sex, &resolver) {
                 println!("    ! {problem}");
             }
         }
@@ -424,26 +448,34 @@ fn cmd_preview(resolved: &GamePaths, a: &PreviewArgs) -> Result<()> {
     } else {
         load_model(&resolver, &a.model)?.with_context(|| format!("{}: the game has no such file", a.model))?
     };
-    if !a.armour.is_empty() || a.outfit.is_some() {
+    let outfit_save = match &a.outfit {
+        Some(save) => {
+            let entries = list_saves(resolved)?;
+            Some(saves::resolve_save(save, &entries)?.clone())
+        }
+        None => None,
+    };
+    // Asked for, else the character's, else female.
+    let sex = a.sex.map(BodySex::from).or_else(|| outfit_save.as_ref().map(|e| e.header.player_sex.into())).unwrap_or_default();
+    if !a.armour.is_empty() || outfit_save.is_some() {
         let catalog = ArmourCatalog::for_game(resolved)?;
         let mut chosen = Vec::new();
         for text in &a.armour {
             chosen.push((find_armour(&catalog, &resolver, text)?, true));
         }
-        if let Some(save) = &a.outfit {
-            let entries = list_saves(resolved)?;
-            let entry = saves::resolve_save(save, &entries)?;
+        if let Some(entry) = &outfit_save {
             let worn = skyplug_core::outfit::read_outfit_from_file(&entry.path)?;
             let keys: Vec<_> = worn.worn.iter().map(|w| w.key.clone()).collect();
             // A save's outfit is what it is: a model that can't be read is skipped, not fatal.
             chosen.extend(catalog.armours_for(&keys, Some(&resolver)).into_iter().map(|armour| (armour, false)));
         }
         for (armour, asked) in chosen {
-            println!("armour {} ({}, from {}): {}", armour.label(), armour.editor_id, armour.plugin, armour.models.join(", "));
-            for problem in armour.visibility_problems(&resolver) {
+            let set = armour.models_for(sex);
+            println!("armour {} ({}, from {}): {}", armour.label(), armour.editor_id, armour.plugin, set.models.join(", "));
+            for problem in armour.visibility_problems(sex, &resolver) {
                 println!("  WARNING: {problem}");
             }
-            for (m, alts) in armour.models.iter().zip(&armour.alt_textures) {
+            for (m, alts) in set.models.iter().zip(&set.alt_textures) {
                 let loaded = load_with_swaps(&resolver, m, alts).and_then(|l| l.with_context(|| format!("{m}: the game has no such file")));
                 match loaded {
                     Ok(part) => model.merge(part),
@@ -454,7 +486,7 @@ fn cmd_preview(resolved: &GamePaths, a: &PreviewArgs) -> Result<()> {
         }
     }
     if a.body {
-        for asset in render::FEMALE_BODY {
+        for asset in sex.body() {
             match load_model(&resolver, asset)? {
                 Some(body) => model.merge_underlay(body),
                 None => eprintln!("note: no {asset} in this install"),
@@ -466,12 +498,12 @@ fn cmd_preview(resolved: &GamePaths, a: &PreviewArgs) -> Result<()> {
     }
     anyhow::ensure!(model.mesh_count() > 0, "{}: nothing to draw (no meshes it can read)", a.model);
     if !a.no_pose {
-        match render::load_skeleton(&resolver) {
+        match render::load_skeleton_for(&resolver, sex) {
             Some(skeleton) => {
                 let r = model.pose(&skeleton);
                 println!("posed {} skinned meshes on the game's skeleton: {} move, by up to {:.1} units", r.posed, r.moved, r.largest);
             }
-            None => eprintln!("note: this install has no female skeleton; drawing models as stored"),
+            None => eprintln!("note: this install has no {} skeleton; drawing models as stored", if sex == BodySex::Male { "male" } else { "female" }),
         }
     }
 
@@ -548,7 +580,7 @@ fn main() -> Result<()> {
         Command::Saves { character } => cmd_saves(&resolved, character),
         Command::SavePlugins { save } => cmd_save_plugins(&resolved, save),
         Command::Outfit { save } => cmd_outfit(&resolved, save),
-        Command::Armours { plugin, filter, check } => cmd_armours(&resolved, plugin.as_deref(), filter.as_deref(), *check),
+        Command::Armours { plugin, filter, check, sex } => cmd_armours(&resolved, plugin.as_deref(), filter.as_deref(), *check, sex.map(BodySex::from).unwrap_or_default()),
         Command::Preview(args) => cmd_preview(&resolved, args),
         Command::Man { .. } => unreachable!(),
     }

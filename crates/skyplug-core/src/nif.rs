@@ -1641,7 +1641,7 @@ pub(crate) mod tests {
         let mut names: Vec<String> = vec![];
         for (plugin, _) in catalog.plugins_with_armours() {
             for a in catalog.armours_in(&plugin, Some(&resolver)).unwrap() {
-                names.extend(a.models);
+                names.extend(a.female.models);
             }
         }
         // Creature skins are armour records too, but they hang on their own skeletons.

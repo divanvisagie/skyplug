@@ -68,6 +68,33 @@ struct Arma {
     slots: u32,
 }
 
+/// Which body a model is for: armours have a mesh for women and one for men.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BodySex {
+    #[default]
+    Female,
+    Male,
+}
+
+impl From<crate::saves::Sex> for BodySex {
+    /// A save's sex; one that is neither (nothing in the game) is drawn as female.
+    fn from(sex: crate::saves::Sex) -> Self {
+        if sex == crate::saves::Sex::Male { BodySex::Male } else { BodySex::Female }
+    }
+}
+
+/// The models an armour is worn as on one body.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelSet {
+    /// Game paths of the worn models, like `meshes/armor/iron/f/cuirassf_1.nif`.
+    pub models: Vec<String>,
+    /// For each of `models`, the slots of the armature that wears it (bit 0 is slot 30; 0 if
+    /// the armature gives none).
+    pub slots: Vec<u32>,
+    /// For each of `models`, the texture swaps its armature applies (usually none).
+    pub alt_textures: Vec<Vec<AltTexture>>,
+}
+
 /// An armour record and what it's worn as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Armour {
@@ -81,13 +108,10 @@ pub struct Armour {
     pub name: Option<String>,
     /// The biped slots it covers, as a bit set: bit 0 is slot 30.
     pub slots: u32,
-    /// Game paths of the worn models, like `meshes/armor/iron/f/cuirassf_1.nif`.
-    pub models: Vec<String>,
-    /// For each of `models`, the slots of the armature that wears it (bit 0 is slot 30; 0 if
-    /// the armature gives none).
-    pub model_slots: Vec<u32>,
-    /// For each of `models`, the texture swaps its armature applies (usually none).
-    pub alt_textures: Vec<Vec<AltTexture>>,
+    /// What it is worn as by women, and by men. An armature with a model for only one sex
+    /// gives that one to both.
+    pub female: ModelSet,
+    pub male: ModelSet,
     /// Armatures it lists that no loaded plugin defines.
     pub missing_armatures: usize,
 }
@@ -99,6 +123,14 @@ impl Armour {
     /// The name, or the editor ID if the name couldn't be read.
     pub fn label(&self) -> &str {
         self.name.as_deref().filter(|n| !n.is_empty()).unwrap_or(&self.editor_id)
+    }
+
+    /// The models worn on `sex`'s body.
+    pub fn models_for(&self, sex: BodySex) -> &ModelSet {
+        match sex {
+            BodySex::Female => &self.female,
+            BodySex::Male => &self.male,
+        }
     }
 
     /// Whether this entry changes an armour another plugin added.
@@ -299,24 +331,31 @@ impl ArmourCatalog {
         let missing_armatures = addons.len() - found.len();
         let human: Vec<&Arma> = found.iter().copied().filter(|a| !a.race.as_ref().is_some_and(is_beast_race)).collect();
         let chosen = if human.is_empty() { found } else { human };
-        let mut models: Vec<String> = Vec::new();
-        let mut model_slots: Vec<u32> = Vec::new();
-        let mut alt_textures: Vec<Vec<AltTexture>> = Vec::new();
-        for a in chosen {
-            let (model, alts) = if a.female.is_some() { (a.female.as_ref(), &a.female_alts) } else { (a.male.as_ref(), &a.male_alts) };
-            if let Some(m) = model {
-                let path = game_path(m);
-                if !models.contains(&path) {
-                    models.push(path);
-                    model_slots.push(a.slots);
-                    alt_textures.push(
-                        alts.iter()
-                            .filter_map(|r| self.texture_sets.get(&r.set).map(|t| AltTexture { shape: r.shape.clone(), textures: t.clone() }))
-                            .collect(),
-                    );
+        let set = |sex: BodySex| {
+            let mut out = ModelSet::default();
+            for a in &chosen {
+                // The armature's model for this body, else the other one's.
+                let (own, other, own_alts, other_alts) = match sex {
+                    BodySex::Female => (&a.female, &a.male, &a.female_alts, &a.male_alts),
+                    BodySex::Male => (&a.male, &a.female, &a.male_alts, &a.female_alts),
+                };
+                let (model, alts) = if own.is_some() { (own.as_ref(), own_alts) } else { (other.as_ref(), other_alts) };
+                if let Some(m) = model {
+                    let path = game_path(m);
+                    if !out.models.contains(&path) {
+                        out.models.push(path);
+                        out.slots.push(a.slots);
+                        out.alt_textures.push(
+                            alts.iter()
+                                .filter_map(|r| self.texture_sets.get(&r.set).map(|t| AltTexture { shape: r.shape.clone(), textures: t.clone() }))
+                                .collect(),
+                        );
+                    }
                 }
             }
-        }
+            out
+        };
+        let (female, male) = (set(BodySex::Female), set(BodySex::Male));
         Armour {
             defined_in: self.defined_in(&key),
             plugin: file.name.clone(),
@@ -324,9 +363,8 @@ impl ArmourCatalog {
             editor_id: r.editor_id().unwrap_or_default(),
             name,
             slots,
-            models,
-            model_slots,
-            alt_textures,
+            female,
+            male,
             missing_armatures,
         }
     }
@@ -455,9 +493,10 @@ pub fn partition_problems(model: &str, mask: u32, nif: &crate::nif::Nif) -> Vec<
 
 impl Armour {
     /// Read each of this armour's models and say what the game won't draw (see [`partition_problems`]).
-    pub fn visibility_problems(&self, resolver: &AssetResolver) -> Vec<String> {
+    pub fn visibility_problems(&self, sex: BodySex, resolver: &AssetResolver) -> Vec<String> {
         let mut out = Vec::new();
-        for (model, &mask) in self.models.iter().zip(&self.model_slots) {
+        let set = self.models_for(sex);
+        for (model, &mask) in set.models.iter().zip(&set.slots) {
             if let Ok(Some(bytes)) = resolver.read_asset(model)
                 && let Ok(nif) = crate::nif::parse(&bytes)
             {
@@ -598,17 +637,24 @@ mod tests {
         // by Mod.esp wins the armature, so the vanilla armour is now worn as the refitted model.
         let iron = by("ArmorIron");
         assert_eq!(iron.name.as_deref(), Some("Iron Armor"));
-        assert_eq!(iron.models, ["meshes/armor/iron/f/unp_cuirass_1.nif"]);
+        assert_eq!(iron.female.models, ["meshes/armor/iron/f/unp_cuirass_1.nif"]);
+        // Men wear the armature's other model: the refit only changed the female one.
+        assert_eq!(iron.male.models, ["meshes/armor/iron/m/cuirass_1.nif"]);
+        assert_eq!(iron.models_for(BodySex::Male), &iron.male);
+        assert_eq!(iron.models_for(BodySex::Female), &iron.female);
         assert_eq!(iron.slot_names(), ["Body"]);
         assert!(!iron.is_override());
         assert_eq!(iron.defined_in, "Skyrim.esm");
         // No female model: the male one. A listed armature no plugin has is counted.
         let odd = by("ArmorOdd");
-        assert_eq!(odd.models, ["meshes/armor/misc/male_1.nif"]);
+        assert_eq!(odd.female.models, ["meshes/armor/misc/male_1.nif"]);
+        assert_eq!(odd.male.models, ["meshes/armor/misc/male_1.nif"]);
         assert_eq!(odd.missing_armatures, 1);
         assert_eq!(odd.slot_names(), ["Hands"]);
         // Only a beast armature: used rather than leaving the armour empty.
-        assert_eq!(by("ArmorBeastOnly").models, ["meshes/armor/iron/arg/cuirass_1.nif"]);
+        assert_eq!(by("ArmorBeastOnly").female.models, ["meshes/armor/iron/arg/cuirass_1.nif"]);
+        // A model for women only is what men get too, rather than nothing.
+        assert_eq!(by("ArmorBeastOnly").male.models, ["meshes/armor/iron/arg/cuirass_1.nif"]);
         // Sorted by name.
         let labels: Vec<_> = vanilla.iter().map(|a| a.label().to_string()).collect();
         assert_eq!(labels, ["Beast Armor", "Iron Armor", "Odd Armor"]);
@@ -622,7 +668,7 @@ mod tests {
         assert_eq!(modp.len(), 3);
         let own = modp.iter().find(|a| a.editor_id == "ModArmour").unwrap();
         assert_eq!(own.name.as_deref(), Some("Mod Armour"), "an inline name in a plugin that isn't localized");
-        assert_eq!(own.models, ["meshes/mod/new_1.nif"]);
+        assert_eq!(own.female.models, ["meshes/mod/new_1.nif"]);
         assert!(!own.is_override());
         let over = modp.iter().find(|a| a.editor_id == "ArmorIron").unwrap();
         assert!(over.is_override());
@@ -718,8 +764,8 @@ mod tests {
         write(&data, "T.esp", &plugin(0, &[], &[group(b"ARMA", &[skirt, plain]), group(b"ARMO", &[armo])]));
         let catalog = ArmourCatalog::open(&data, &["T.esp".to_string()]);
         let a = &catalog.armours_in("T.esp", None).unwrap()[0];
-        assert_eq!(a.models, ["meshes/a/skirt_1.nif", "meshes/a/plain_1.nif"]);
-        assert_eq!(a.model_slots, [1 << 18, 0]);
+        assert_eq!(a.female.models, ["meshes/a/skirt_1.nif", "meshes/a/plain_1.nif"]);
+        assert_eq!(a.female.slots, [1 << 18, 0]);
     }
 
     fn alt_subrecord(entries: &[(&str, u32, i32)]) -> Vec<u8> {
@@ -750,9 +796,9 @@ mod tests {
         let catalog = ArmourCatalog::open(&data, &["T.esp".to_string()]);
         let list = catalog.armours_in("T.esp", None).unwrap();
         let (alt, base) = (list.iter().find(|a| a.editor_id == "Alt").unwrap(), list.iter().find(|a| a.editor_id == "Base").unwrap());
-        assert_eq!(alt.models, base.models, "the same model");
-        assert!(base.alt_textures[0].is_empty());
-        let swap = &alt.alt_textures[0];
+        assert_eq!(alt.female.models, base.female.models, "the same model");
+        assert!(base.female.alt_textures[0].is_empty());
+        let swap = &alt.female.alt_textures[0];
         assert_eq!(swap.len(), 1);
         assert_eq!(swap[0].shape, "Outfit");
         // TX00 diffuse, TX01 normal, TX02 environment mask (nif slot 5), TX05 environment (nif slot 4).
@@ -792,6 +838,14 @@ mod tests {
     }
 
     #[test]
+    fn a_saves_sex_is_a_body() {
+        use crate::saves::Sex;
+        assert_eq!(BodySex::from(Sex::Male), BodySex::Male);
+        assert_eq!(BodySex::from(Sex::Female), BodySex::Female);
+        assert_eq!(BodySex::from(Sex::Unknown(7)), BodySex::Female);
+    }
+
+    #[test]
     fn slot_names() {
         let a = Armour {
             key: FormKey { plugin: "a.esp".into(), id: 1 },
@@ -800,9 +854,8 @@ mod tests {
             editor_id: "X".into(),
             name: None,
             slots: 0b100 | 0b1000 | (1 << 14),
-            models: vec![],
-            model_slots: vec![],
-            alt_textures: vec![],
+            female: ModelSet::default(),
+            male: ModelSet::default(),
             missing_armatures: 0,
         };
         assert_eq!(a.slot_names(), ["Body", "Hands", "slot 44"]);
@@ -839,9 +892,9 @@ mod tests {
                     unnamed += 1;
                     *unnamed_by.entry(a.plugin.clone()).or_insert(0usize) += 1;
                 }
-                if a.models.is_empty() { no_models += 1 }
+                if a.female.models.is_empty() { no_models += 1 }
                 missing_armatures += a.missing_armatures;
-                for m in &a.models {
+                for m in &a.female.models {
                     models += 1;
                     if resolver.resolve(m).is_none() {
                         missing_files.push(format!("{} / {} -> {m}", a.plugin, a.label()));
@@ -862,8 +915,8 @@ mod tests {
         let mut checked = 0;
         for (name, _) in &plugins {
             for a in catalog.armours_in(name, Some(&resolver)).unwrap() {
-                checked += a.models.len();
-                for p in a.visibility_problems(&resolver) {
+                checked += a.female.models.len();
+                for p in a.visibility_problems(BodySex::Female, &resolver) {
                     flagged.entry(a.plugin.clone()).or_default().push(format!("{}: {p}", a.label()));
                 }
             }
@@ -872,7 +925,7 @@ mod tests {
         let (mut swapped, mut swap_paths, mut swap_missing) = (0, 0, Vec::new());
         for (name, _) in &plugins {
             for a in catalog.armours_in(name, Some(&resolver)).unwrap() {
-                let swaps: Vec<&AltTexture> = a.alt_textures.iter().flatten().collect();
+                let swaps: Vec<&AltTexture> = a.female.alt_textures.iter().flatten().collect();
                 swapped += usize::from(!swaps.is_empty());
                 for alt in swaps {
                     for t in alt.textures.iter().filter(|t| !t.is_empty()) {
@@ -898,9 +951,9 @@ mod tests {
 
         let vanilla = catalog.armours_in("Skyrim.esm", Some(&resolver)).unwrap();
         let iron = vanilla.iter().find(|a| a.editor_id == "ArmorIronCuirass").expect("the iron cuirass");
-        eprintln!("iron cuirass: {:?} slots {:?} models {:?}", iron.name, iron.slot_names(), iron.models);
+        eprintln!("iron cuirass: {:?} slots {:?} models {:?}", iron.name, iron.slot_names(), iron.female.models);
         assert_eq!(iron.name.as_deref(), Some("Iron Armor"));
-        assert!(!iron.models.is_empty());
+        assert!(!iron.female.models.is_empty());
         assert!(vanilla.len() > 2000);
         assert!(named * 10 > total * 9, "most armours should have names");
     }

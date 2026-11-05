@@ -145,12 +145,12 @@ the armours the load order has for the worn items, with the slots they cover.
 Items made in game (enchanted or renamed copies) have no record in a plugin and are only counted,
 and a worn weapon or torch is shown as not armour.
 Only Special Edition saves can be read.
-.It Cm armours Op Ar plugin Op Fl -filter Ar text Op Fl -check
+.It Cm armours Op Ar plugin Op Fl -filter Ar text Op Fl -check Op Fl -sex Ar sex
 Without
 .Ar plugin ,
 list the plugins in the load order that have armour records, with how many.
 With one, list its armours: name, editor ID, the slots it covers, and the models it is worn as
-(for a female character, the human races), as the load order wears it: the last plugin that
+(by default those a woman wears, of the human races), as the load order wears it: the last plugin that
 changes an armature decides, so a plugin that refits vanilla armours shows the refitted models.
 An armour a plugin only changes is marked with the plugin that adds it.
 .Fl -filter
@@ -162,9 +162,11 @@ any the game won't draw: a skinned model records which slot each skin partition 
 and the game only draws a partition whose slot is among the slots of the armature wearing it,
 so moving an armour to another slot in its plugin without moving its model makes it
 invisible.
+.Fl -sex Cm male
+lists the models a man wears instead; an armature with a model for only one sex gives it to both.
 .Cm preview Fl -armour
 warns about the same.
-.It Cm preview Ar model Op Fl o | Fl -out Ar file Op Fl -views Ar list Op Fl -size Ar pixels Op Fl -body Op Fl -with Ar model Op Fl -elevation Ar degrees Op Fl -zoom Ar factor Op Fl -transparent Op Fl -no-pose
+.It Cm preview Ar model Op Fl o | Fl -out Ar file Op Fl -views Ar list Op Fl -size Ar pixels Op Fl -body Op Fl -with Ar model Op Fl -elevation Ar degrees Op Fl -zoom Ar factor Op Fl -transparent Op Fl -no-pose Op Fl -sex Ar sex
 Draw
 .Ar model
 with its textures and write a PNG with the views side by side, and print where each
@@ -204,6 +206,11 @@ Use
 .Ar -
 as the model to draw only the outfit.
 A worn model the renderer can't read (a Skyrim LE one) is skipped with a warning.
+.It Fl -sex Ar sex
+The body to draw armours on, and the skeleton to pose them on: \fBfemale\fR or \fBmale\fR.
+Female unless
+.Fl -outfit
+names a save of a man.
 .It Fl -elevation Ar degrees
 Camera height above the horizon; the default is 6.
 .It Fl -zoom Ar factor

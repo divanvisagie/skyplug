@@ -22,6 +22,7 @@ use anyhow::Result;
 
 use crate::assets::AssetResolver;
 use crate::dds::{Dds, Rgba};
+use crate::armour::BodySex;
 use crate::nif::{self, Mesh, Nif, Skeleton};
 
 /// Whether triangles wind counter-clockwise when seen from the front, as
@@ -36,8 +37,36 @@ pub const FEMALE_BODY: [&str; 3] = [
     "meshes/actors/character/character assets/femalefeet_1.nif",
 ];
 
+/// The male body, hands and feet, as [`FEMALE_BODY`].
+pub const MALE_BODY: [&str; 3] = [
+    "meshes/actors/character/character assets/malebody_1.nif",
+    "meshes/actors/character/character assets/malehands_1.nif",
+    "meshes/actors/character/character assets/malefeet_1.nif",
+];
+
 /// The game's female skeleton, which skinned models are posed on.
 pub const FEMALE_SKELETON: &str = "meshes/actors/character/character assets female/skeleton_female.nif";
+
+/// The game's male skeleton.
+pub const MALE_SKELETON: &str = "meshes/actors/character/character assets/skeleton.nif";
+
+impl BodySex {
+    /// The body, hands and feet worn under armour, as game paths.
+    pub fn body(self) -> &'static [&'static str; 3] {
+        match self {
+            BodySex::Female => &FEMALE_BODY,
+            BodySex::Male => &MALE_BODY,
+        }
+    }
+
+    /// The skeleton skinned models are posed on.
+    pub fn skeleton(self) -> &'static str {
+        match self {
+            BodySex::Female => FEMALE_SKELETON,
+            BodySex::Male => MALE_SKELETON,
+        }
+    }
+}
 
 /// What [`Model::pose`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -144,7 +173,12 @@ pub struct Model {
 
 /// The game's female skeleton, read through `resolver`; `None` if the game has none.
 pub fn load_skeleton(resolver: &AssetResolver) -> Option<Skeleton> {
-    let bytes = resolver.read_asset(FEMALE_SKELETON).ok()??;
+    load_skeleton_for(resolver, BodySex::Female)
+}
+
+/// The game's skeleton for `sex`, read through `resolver`; `None` if the game has none.
+pub fn load_skeleton_for(resolver: &AssetResolver, sex: BodySex) -> Option<Skeleton> {
+    let bytes = resolver.read_asset(sex.skeleton()).ok()??;
     nif::parse(&bytes).ok().map(|n| Skeleton::from_nif(&n)).filter(|s| !s.is_empty())
 }
 
@@ -802,5 +836,14 @@ mod tests {
         assert!(rendered > 100);
         assert!(blank * 20 < rendered, "too many blank renders: {blank} of {rendered}");
         assert_eq!(tex_bad, 0);
+    }
+
+    #[test]
+    fn each_sex_has_its_own_body_and_skeleton() {
+        assert_eq!(BodySex::Female.body(), &FEMALE_BODY);
+        assert_eq!(BodySex::Male.body(), &MALE_BODY);
+        assert!(BodySex::Female.skeleton().contains("female"));
+        assert!(!BodySex::Male.skeleton().contains("female"));
+        assert!(MALE_BODY.iter().all(|p| p.contains("male") && !p.contains("female")));
     }
 }

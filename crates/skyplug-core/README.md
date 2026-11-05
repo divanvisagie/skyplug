@@ -45,7 +45,7 @@ decides how to present them.
   warnings and the rest still loads. A skinned shape keeps its bones, bind
   transforms and per-vertex weights, and `Mesh::pose(&Skeleton)` moves it the
   way the game does, by the weighted bones of the game's skeleton
-  (`Skeleton::from_nif` of `skeleton_female.nif`): a model made on a skeleton
+  (`Skeleton::from_nif` of `skeleton_female.nif`, or `skeleton.nif` for men): a model made on a skeleton
   that differs from the game's (a few mods' are shifted by a couple of units)
   comes out where it does in game. No animation, collision, particles or face
   meshes yet.
@@ -56,13 +56,16 @@ decides how to present them.
   they're worn as. An armour only lists "armatures", and the last plugin in the
   load order to change an armature decides its model, so a refit like UNP
   Vanilla Outfits shows through. Names come from the plugin or, for the
-  localized base plugins, from their string tables. Models are the female ones
-  for the human races. `Armour::visibility_problems` reads each model and says
+  localized base plugins, from their string tables. Each armour has a model set
+  for women and one for men (`Armour::female`, `Armour::male`, or
+  `Armour::models_for(BodySex)`), for the human races; an armature with a model
+  for only one sex gives it to both. `ArmourCatalog::armours_for` finds the
+  armours for a list of record keys. `Armour::visibility_problems(sex, …)` reads each model and says
   which shapes the game won't draw: it only draws a skin partition whose slot
   is among the slots of the armature wearing it (`partition_problems`), so an
   armour moved to another slot in its plugin without its model is invisible.
   Armatures' texture swaps (`MO3S`/`MO2S` with the `TXST` texture sets they
-  name) come with each model as `Armour::alt_textures`, and
+  name) come with each model as `ModelSet::alt_textures`, and
   `apply_alternate_textures` puts them on a parsed model: the Tartan and Dark
   variants of an outfit are the same mesh with another set.
 - **`render`** — a small software renderer: a `Model` is meshes plus their
@@ -70,8 +73,17 @@ decides how to present them.
   where every texture came from, or that it's missing), and `render` draws it
   from a `Camera` into RGBA with a z-buffer, backface culling, alpha test and
   blend, and supersampling. `Model::pose` poses its skinned meshes on a
-  skeleton (`render::load_skeleton` reads the game's) and reports what moved.
+  skeleton (`render::load_skeleton_for` reads the game's, per `BodySex`) and
+  reports what moved. `BodySex::body` names the installed body, hands and feet
+  to draw under armour.
   For checking shape, mapping and colour, not the game's shading.
+- **`outfit`** — what a character wears, read from a Special Edition save:
+  the worn items in the player's inventory (the `Worn` and `WornLeft` extra
+  data) as plugin and FormID, with items made in game counted rather than
+  listed. `ArmourCatalog::armours_for` turns them into armours. The inventory
+  is found by scanning the player's change form for the block that parses end
+  to end, so a save with an extra data type this doesn't know fails instead of
+  showing a wrong outfit.
 - **`assets`** — `AssetResolver` finds an asset the way the game does, and
   says what it hides: loose files in `Data` first, then archives in load
   order (the base game's from `Skyrim_Default.ini`, `Skyrim.ini` and

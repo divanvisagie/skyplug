@@ -37,6 +37,8 @@ skyplug save-plugins <save>       # list the plugins active in a specific save
 skyplug armours                   # the plugins that have armour records
 skyplug armours <plugin>          # a plugin's armours and the models they're worn as
 skyplug armours <plugin> --check  # ...and mark models the game won't draw (slot mismatch)
+skyplug armours <plugin> --sex male   # the models a man wears (women's by default)
+skyplug outfit <save>             # what a character wears in a save
 
 skyplug preview <model>           # render a model with its textures to a PNG, and say
                                   # which file each texture comes from (see below)
@@ -52,16 +54,21 @@ skyplug preview meshes/armor/iron/f/cuirass_1.nif --body -o iron.png
 skyplug preview meshes/a.nif --with meshes/b.nif --with meshes/c.nif   # a whole outfit
 skyplug preview ~/work/mymod.nif --views front,back --size 700         # a file on disk
 skyplug preview - --armour "Northgirl Knit Jumper" --armour "Northgirl Trousers"   # by name
+skyplug preview - --outfit <save> --body                                # what a character wears
 ```
 
 Draws the model from several sides into one PNG and lists every texture it
 uses, as the game resolves them: the loose file or archive that wins, what it
 hides, or `MISSING`. That answers "is my loose file being used?" without
-launching the game. `--body` adds the installed female body for scale;
+launching the game. `--body` adds the installed body for scale (`--sex male`
+switches the body, the armours' models and the skeleton to a man's; the default
+is a woman's, unless `--outfit` names a save of a man);
 `--with` adds more pieces, skinned models are posed on the game's skeleton
 as the game does (`--no-pose` draws them as stored; the output says what
 moved), and `--armour` picks an armour by name or editor ID
-from the load order (see `skyplug armours`), drawn as the load order wears it:
+from the load order (see `skyplug armours`), and `--outfit` draws what a
+character wears in a save (Special Edition saves; a worn model it can't read is
+skipped with a warning), drawn as the load order wears it:
 a plugin that refits vanilla armours shows the refitted models, and a variant
 with its own texture set (Tartan, Dark) is drawn with it.
 

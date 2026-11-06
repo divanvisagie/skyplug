@@ -47,11 +47,13 @@ decides how to present them.
   way the game does, by the weighted bones of the game's skeleton
   (`Skeleton::from_nif` of `skeleton_female.nif`, or `skeleton.nif` for men): a model made on a skeleton
   that differs from the game's (a few mods' are shifted by a couple of units)
-  comes out where it does in game. No animation, collision, particles or face
-  meshes yet.
+  comes out where it does in game. Face and hair meshes (`BSDynamicTriShape`) are read
+  too, from the positions stored at the end of the shape, and drawn as stored (no
+  facegen morphs). No animation, collision or particles yet.
 - **`records`** — reads plugin files: the header (flags, masters) and the
   records of one top-level group at a time, with zlib-compressed bodies,
-  subrecords and FormIDs resolved to the plugin that defines them. Read-only.
+  subrecords and FormIDs resolved to the plugin that defines them. Read-only;
+  the one plugin the crate writes is `hair`'s patch.
 - **`armour`** — `ArmourCatalog`: the armours of a load order and the models
   they're worn as. An armour only lists "armatures", and the last plugin in the
   load order to change an armature decides its model, so a refit like UNP
@@ -68,9 +70,18 @@ decides how to present them.
   name) come with each model as `ModelSet::alt_textures`, and
   `apply_alternate_textures` puts them on a parsed model: the Tartan and Dark
   variants of an outfit are the same mesh with another set.
+- **`hair`** — `HairCatalog`: the head parts (`HDPT`) of a load order, as the last plugin
+  to change each has them: name, kind, sex, whether it's playable, its model and texture
+  set, and whether it's an extra part of another. `HairCatalog::write_patch(hidden, path)`
+  writes `PATCH_NAME` (`Arcanaeum Hair Picks.esp`), a light plugin that overrides each of
+  `hidden` with the playable flag cleared, so character creation stops listing them;
+  `hidden_by_patch` reads what such a patch hides, and with no records to hide the patch
+  is removed. Records are copied whole, uncompressed, with FormIDs renumbered for the
+  patch's own masters.
 - **`render`** — a small software renderer: a `Model` is meshes plus their
   diffuse textures resolved through an `AssetResolver` (with a report of
-  where every texture came from, or that it's missing), and `render` draws it
+  where every texture came from, or that it's missing; a path without its leading
+  `textures\` folder is looked for under it, as the game does), and `render` draws it
   from a `Camera` into RGBA with a z-buffer, backface culling, alpha test and
   blend, and supersampling. `Model::pose` poses its skinned meshes on a
   skeleton (`render::load_skeleton_for` reads the game's, per `BodySex`) and

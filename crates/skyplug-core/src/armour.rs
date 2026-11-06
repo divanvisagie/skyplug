@@ -448,7 +448,7 @@ pub fn apply_alternate_textures(nif: &mut crate::nif::Nif, alts: &[AltTexture]) 
 }
 
 /// `Armor\Iron\F\CuirassLight_1.nif` as stored in a record becomes `meshes/armor/iron/f/cuirasslight_1.nif`.
-fn game_path(model: &str) -> String {
+pub(crate) fn game_path(model: &str) -> String {
     let p = model.replace('\\', "/").to_ascii_lowercase();
     if p.starts_with("meshes/") { p } else { format!("meshes/{p}") }
 }

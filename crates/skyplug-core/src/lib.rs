@@ -8,6 +8,7 @@ pub mod armour;
 pub mod assets;
 pub mod bsa;
 pub mod dds;
+pub mod hair;
 pub mod nif;
 pub mod outfit;
 pub mod plugins;

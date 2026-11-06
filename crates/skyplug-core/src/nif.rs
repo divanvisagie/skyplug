@@ -16,7 +16,8 @@
 //! What it doesn't: skeletons and skinning weights (skinned meshes come out
 //! in the pose they're stored in, with the shape's own transform applied, which
 //! is the upright body pose), animation,
-//! collision, particles, face/head meshes (`BSDynamicTriShape`) and strips.
+//! collision, particles, facegen morphs (a face or hair's `BSDynamicTriShape` is drawn as stored,
+//! from its dynamic positions) and strips.
 //! A block it can't read is skipped by its declared size, noted in
 //! [`Nif::warnings`], and the rest of the file still loads; block types that
 //! look like geometry but aren't handled are listed in [`Nif::unsupported`].
@@ -420,6 +421,8 @@ struct Geometry {
     /// instance's bone list, checked against the skin data on real models: 100% of 48,317 vertices).
     skin_weights: Vec<[f32; 4]>,
     skin_bones: Vec<[u8; 4]>,
+    /// How many vertices the buffer held, whether or not they had positions.
+    vertices: usize,
 }
 
 /// Decode a packed SE vertex buffer described by `desc` (see `BSVertexDesc`).
@@ -454,7 +457,6 @@ fn decode_vertices(raw: &[u8], desc: u64, n: usize, g: &mut Geometry) -> Result<
     .filter(|(f, _)| has(*f))
     .map(|(_, s)| s)
     .sum();
-    ensure!(has(VF_VERTEX), "vertex format has no positions (flags {flags:#x})");
     ensure!(size == expected, "vertex size {size} doesn't match the format's {expected} (flags {flags:#x})");
     ensure!(n.checked_mul(size).is_some_and(|t| t <= raw.len()), "vertex data is cut off");
     let (o_pos, o_uv, o_normal, o_color, o_skin) = (off(4), off(8), off(16), off(24), off(28));
@@ -462,9 +464,13 @@ fn decode_vertices(raw: &[u8], desc: u64, n: usize, g: &mut Geometry) -> Result<
     for (flag, offset, len) in [(VF_VERTEX, o_pos, 12), (VF_UV, o_uv, 4), (VF_NORMAL, o_normal, 3), (VF_COLORS, o_color, 4), (VF_SKINNED, o_skin, 12)] {
         ensure!(!has(flag) || offset + len <= size, "vertex attribute at {offset} doesn't fit a {size}-byte vertex");
     }
+    g.vertices = n;
     for v in raw.chunks_exact(size).take(n) {
         let f = |o: usize| f32::from_le_bytes(v[o..o + 4].try_into().unwrap());
-        g.positions.push([f(o_pos), f(o_pos + 4), f(o_pos + 8)]);
+        // A `BSDynamicTriShape` keeps its positions apart from the rest of its vertices.
+        if has(VF_VERTEX) {
+            g.positions.push([f(o_pos), f(o_pos + 4), f(o_pos + 8)]);
+        }
         if has(VF_UV) {
             let h = |o: usize| half(u16::from_le_bytes(v[o..o + 2].try_into().unwrap()));
             g.uvs.push([h(o_uv), h(o_uv + 2)]);
@@ -492,6 +498,8 @@ struct Shape {
     alpha: i32,
     data: i32, // NiTriShapeData ref for old-style shapes
     own: Option<Geometry>,
+    /// A `BSDynamicTriShape`'s positions, for when its vertex data has none.
+    dynamic: Vec<[f32; 3]>,
 }
 
 fn bs_tri_shape(r: &mut Reader, strings: &[String]) -> Result<Shape> {
@@ -517,7 +525,22 @@ fn bs_tri_shape(r: &mut Reader, strings: &[String]) -> Result<Shape> {
         }
         own = Some(g);
     }
-    Ok(Shape { av, skin, shader, alpha, data: -1, own })
+    Ok(Shape { av, skin, shader, alpha, data: -1, own, dynamic: Vec::new() })
+}
+
+/// `BSDynamicTriShape` (faces and hair): a `BSTriShape`, then its positions again as 16-byte
+/// vectors (the fourth number is for the game's morphing). A skinned one has no positions in its
+/// vertex data at all, so these are the only ones.
+fn bs_dynamic_tri_shape(r: &mut Reader, strings: &[String]) -> Result<Shape> {
+    let mut shape = bs_tri_shape(r, strings)?;
+    ensure!(r.u32()? == 0, "particle data isn't supported");
+    let size = r.u32()? as usize;
+    ensure!(size.is_multiple_of(16), "dynamic data of {size} bytes isn't whole vectors");
+    for v in r.take(size)?.chunks_exact(16) {
+        let f = |o: usize| f32::from_le_bytes(v[o..o + 4].try_into().unwrap());
+        shape.dynamic.push([f(0), f(4), f(8)]);
+    }
+    Ok(shape)
 }
 
 /// `NiTriShape` and friends: geometry is in a separate `NiTriShapeData`.
@@ -530,7 +553,7 @@ fn ni_tri_shape(r: &mut Reader, strings: &[String]) -> Result<Shape> {
     r.skip(materials * 8)?; // material names and extra data
     r.skip(4 + 1)?; // active material, needs-update flag
     let (shader, alpha) = (r.i32()?, r.i32()?);
-    Ok(Shape { av, skin, shader, alpha, data, own: None })
+    Ok(Shape { av, skin, shader, alpha, data, own: None, dynamic: Vec::new() })
 }
 
 fn ni_tri_shape_data(r: &mut Reader) -> Result<Geometry> {
@@ -620,12 +643,9 @@ fn skin_partition(r: &mut Reader) -> Result<Geometry> {
     if data_size > 0 {
         ensure!(data_size.checked_rem(vertex_size) == Some(0), "vertex buffer size doesn't divide by the vertex size");
         let raw = r.take(data_size)?;
-        // Face meshes (`BSDynamicTriShape`) keep positions in the shape itself, so their
-        // partition's vertices have none; only the triangles are of use, and the shape is
-        // reported as unsupported anyway.
-        if desc >> 44 & 0x1 != 0 {
-            decode_vertices(raw, desc, data_size / vertex_size, &mut g)?;
-        }
+        // Face and hair meshes (`BSDynamicTriShape`) keep positions in the shape itself, so their
+        // partition's vertices have none (see `bs_dynamic_tri_shape`).
+        decode_vertices(raw, desc, data_size / vertex_size, &mut g)?;
     }
     r.fits(parts, 20)?;
     for _ in 0..parts {
@@ -701,6 +721,7 @@ fn parse_block(ty: &str, data: &[u8], strings: &[String]) -> Result<Option<Block
         | "BSBlastNode" | "BSDamageStage" | "BSDebrisNode" | "NiBillboardNode" => Block::Node(node(r, strings, false)?),
         "NiSwitchNode" => Block::Node(node(r, strings, true)?),
         "BSTriShape" | "BSSubIndexTriShape" | "BSMeshLODTriShape" => Block::Shape(bs_tri_shape(r, strings)?),
+        "BSDynamicTriShape" => Block::Shape(bs_dynamic_tri_shape(r, strings)?),
         "NiTriShape" => Block::Shape(ni_tri_shape(r, strings)?),
         "NiTriShapeData" => Block::TriData(ni_tri_shape_data(r)?),
         "NiSkinInstance" | "BSDismemberSkinInstance" => {
@@ -924,12 +945,16 @@ fn build_mesh<'a>(
     } else {
         None
     };
-    let geometry = geometry
+    let mut geometry = geometry
         .or_else(|| match get(s.data) {
             Some(Block::TriData(g)) => Some(g.clone()),
             _ => None,
         })
         .context(if skinned { "skinned, but its skin partition couldn't be read" } else { "no geometry" })?;
+    if geometry.positions.is_empty() && !s.dynamic.is_empty() {
+        ensure!(s.dynamic.len() == geometry.vertices, "{} dynamic positions for {} vertices", s.dynamic.len(), geometry.vertices);
+        geometry.positions = s.dynamic.clone();
+    }
     // A shape with indices pointing outside its vertices is broken; drawing it would panic callers.
     let n = geometry.positions.len();
     ensure!(n > 0, "no vertices");
@@ -1255,6 +1280,84 @@ pub(crate) mod tests {
         assert_eq!(m.triangles, [[0, 1, 2]]);
     }
 
+    /// A skinned `BSDynamicTriShape` the way hair is stored: the partition's vertices have UVs and
+    /// normals but no positions, and the shape ends with its positions as 16-byte vectors.
+    fn dynamic_hair(positions: &[[f32; 3]], particle: u32) -> Vec<u8> {
+        let mut verts = vec![];
+        for (_, uv, n) in &TRI {
+            for h in uv {
+                verts.extend_from_slice(&h.to_le_bytes());
+            }
+            verts.extend_from_slice(&[n[0], n[1], n[2], 128]);
+        }
+        let desc: u64 = 2 | (1 << 16) | (0xA << 44); // 8 bytes: UV, then normal
+        let mut partition = vec![];
+        u32le(&mut partition, 1);
+        u32le(&mut partition, verts.len() as u32);
+        u32le(&mut partition, 8);
+        partition.extend_from_slice(&desc.to_le_bytes());
+        partition.extend_from_slice(&verts);
+        for v in [3u16, 1, 0, 0, 0] {
+            partition.extend_from_slice(&v.to_le_bytes());
+        }
+        partition.extend_from_slice(&[0, 0, 1]);
+        for i in [0u16, 1, 2] {
+            partition.extend_from_slice(&i.to_le_bytes());
+        }
+        partition.push(0);
+        partition.extend_from_slice(&[0, 0]);
+        partition.extend_from_slice(&0u64.to_le_bytes());
+        for i in [0u16, 1, 2] {
+            partition.extend_from_slice(&i.to_le_bytes());
+        }
+        let mut instance = vec![];
+        instance.extend_from_slice(&(-1i32).to_le_bytes());
+        instance.extend_from_slice(&2i32.to_le_bytes());
+        instance.extend_from_slice(&(-1i32).to_le_bytes());
+        u32le(&mut instance, 0);
+        let mut shape = bs_tri_shape_block(1, [0.0; 3], 1, -1, -1, false);
+        u32le(&mut shape, particle);
+        u32le(&mut shape, positions.len() as u32 * 16);
+        for p in positions {
+            for c in p {
+                f32le(&mut shape, *c);
+            }
+            f32le(&mut shape, 0.5); // the morph weight, unused
+        }
+        file(
+            100,
+            &["Root", "Hair"],
+            &[
+                ("NiNode", ni_node(0, [0.0, 0.0, 0.0], &[3], None)),
+                ("NiSkinInstance", instance),
+                ("NiSkinPartition", partition),
+                ("BSDynamicTriShape", shape),
+            ],
+        )
+    }
+
+    #[test]
+    fn dynamic_tri_shape_takes_its_positions_from_the_end_of_the_shape() {
+        let nif = parse(&dynamic_hair(&[[0.0, 0.0, 120.0], [1.0, 0.0, 120.0], [0.0, 1.0, 121.0]], 0)).unwrap();
+        assert!(nif.warnings.is_empty(), "{:?}", nif.warnings);
+        assert!(nif.unsupported.is_empty());
+        let m = &nif.meshes[0];
+        assert!(m.skinned);
+        assert_eq!(m.positions, [[0.0, 0.0, 120.0], [1.0, 0.0, 120.0], [0.0, 1.0, 121.0]]);
+        assert_eq!(m.triangles, [[0, 1, 2]]);
+        assert_eq!(m.uvs, [[0.0, 0.0], [1.0, 0.0], [0.0, 0.5]], "UVs come from the partition");
+        assert_eq!(m.normals.len(), 3);
+    }
+
+    #[test]
+    fn dynamic_tri_shape_with_the_wrong_amount_of_positions_is_refused() {
+        let nif = parse(&dynamic_hair(&[[0.0; 3], [1.0, 0.0, 0.0]], 0)).unwrap();
+        assert!(nif.meshes.is_empty(), "two positions for three vertices");
+        assert!(!nif.warnings.is_empty());
+        let nif = parse(&dynamic_hair(&[[0.0; 3]; 3], 7)).unwrap();
+        assert!(nif.meshes.is_empty() && nif.warnings[0].contains("particle"), "{:?}", nif.warnings);
+    }
+
     #[test]
     fn old_style_ni_tri_shape_with_data() {
         let mut shape = av(0, [0.0; 3], 2.0, 1); // scale 2, hidden
@@ -1342,7 +1445,7 @@ pub(crate) mod tests {
                 ("NiNode", ni_node(0, [0.0; 3], &[1, 2], None)),
                 ("BSTriShape", bad),
                 ("BSTriShape", bs_tri_shape_block(2, [0.0; 3], -1, -1, -1, true)),
-                ("BSDynamicTriShape", vec![0; 8]),
+                ("NiTriStrips", vec![0; 8]),
                 ("bhkRigidBody", vec![0; 8]),
             ],
         );
@@ -1351,7 +1454,7 @@ pub(crate) mod tests {
         assert_eq!(nif.meshes[0].name, "Good");
         assert_eq!(nif.warnings.len(), 1, "{:?}", nif.warnings);
         assert!(nif.warnings[0].contains("block 1 (BSTriShape)"));
-        assert_eq!(nif.unsupported, ["BSDynamicTriShape"], "collision isn't visible geometry");
+        assert_eq!(nif.unsupported, ["NiTriStrips"], "collision isn't visible geometry");
     }
 
     #[test]

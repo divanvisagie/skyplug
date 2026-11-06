@@ -182,6 +182,24 @@ pub fn load_skeleton_for(resolver: &AssetResolver, sex: BodySex) -> Option<Skele
     nif::parse(&bytes).ok().map(|n| Skeleton::from_nif(&n)).filter(|s| !s.is_empty())
 }
 
+/// A texture path as a model writes it, resolved the way the game does: a path without the
+/// leading `textures\` folder (hair packs have some) is looked for under it. Returns the path
+/// that was tried last, which is the one with the folder when that's what was found.
+fn resolve_texture(resolver: &AssetResolver, path: &str) -> (String, Option<crate::assets::Resolved>) {
+    if let Some(found) = resolver.resolve(path) {
+        return (path.to_string(), Some(found));
+    }
+    let lower = path.replace('\\', "/").to_ascii_lowercase();
+    if lower.starts_with("textures/") {
+        return (path.to_string(), None);
+    }
+    let with_folder = format!("textures\\{path}");
+    match resolver.resolve(&with_folder) {
+        Some(found) => (with_folder, Some(found)),
+        None => (path.to_string(), None),
+    }
+}
+
 impl Model {
     /// Load the diffuse texture of each mesh of `nif` through `resolver`, at
     /// most about `max_texture_side` pixels on a side (so big textures decode
@@ -191,8 +209,9 @@ impl Model {
         let mut cache: HashMap<String, Result<Arc<Texture>, String>> = HashMap::new();
         for mesh in nif.meshes.iter().filter(|m| !m.hidden) {
             let mut diffuse = Diffuse::None;
-            for (slot, path) in mesh.textures.iter().enumerate().filter(|(_, p)| !p.is_empty()) {
-                let result = match resolver.resolve(path) {
+            for (slot, authored) in mesh.textures.iter().enumerate().filter(|(_, p)| !p.is_empty()) {
+                let (path, found) = resolve_texture(resolver, authored);
+                let result = match found {
                     None => {
                         if slot == nif::slot::DIFFUSE {
                             diffuse = Diffuse::Broken;
@@ -224,14 +243,14 @@ impl Model {
                                 }
                                 Err(e) => {
                                     diffuse = Diffuse::Broken;
-                                    model.warnings.push(format!("texture {path}: {e}"));
+                                    model.warnings.push(format!("texture {authored}: {e}"));
                                     TextureResult::Unreadable(e.clone())
                                 }
                             }
                         }
                     }
                 };
-                model.textures.push(TextureStatus { mesh: mesh.name.clone(), slot, path: path.clone(), result });
+                model.textures.push(TextureStatus { mesh: mesh.name.clone(), slot, path, result });
             }
             // Shapes with the skin-tint shader are bare skin: a body, hands or feet bundled in an
             // armour file. Treat them as the body underlay so clothes drawn over them show.
@@ -653,6 +672,28 @@ mod tests {
         m.merge_underlay(Model::from_meshes(vec![(tri(0.0), blue())]));
         let p = px(&render(&m, &front(), &opts()), 16, 20);
         assert!(p[2] > 100 && p[0] < 40, "{p:?}");
+    }
+
+    #[test]
+    fn a_texture_path_without_the_textures_folder_is_found_under_it() {
+        let dir = crate::bsa::tests::temp_dir("render_texture_prefix");
+        std::fs::create_dir_all(dir.join("textures/Pack")).unwrap();
+        std::fs::write(dir.join("textures/Pack/Hair.dds"), crate::dds::tests::make_bgra(4, 4, [20, 30, 200, 255])).unwrap();
+        let resolver = AssetResolver::new(&dir, []);
+        let mut with = tri(0.0);
+        with.textures = vec!["textures\\pack\\hair.dds".into()];
+        let mut without = tri(0.0);
+        without.textures = vec!["pack\\hair.dds".into()];
+        let mut nowhere = tri(0.0);
+        nowhere.textures = vec!["pack\\gone.dds".into()];
+        let model = Model::load(&resolver, &Nif { meshes: vec![with, without, nowhere], ..Nif::default() }, 256);
+        let result = |i: usize| &model.textures[i].result;
+        assert!(matches!(result(0), TextureResult::Found { .. }));
+        assert!(matches!(result(1), TextureResult::Found { .. }), "{:?}", result(1));
+        assert_eq!(model.textures[1].path, "textures\\pack\\hair.dds", "reported with the folder it was found under");
+        assert!(matches!(model.meshes[1].diffuse, Diffuse::Texture(_)), "and drawn with it");
+        assert_eq!(*result(2), TextureResult::Missing);
+        assert_eq!(model.textures[2].path, "pack\\gone.dds", "a missing one is reported as written");
     }
 
     #[test]

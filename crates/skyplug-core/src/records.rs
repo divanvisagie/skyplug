@@ -9,7 +9,8 @@
 //! Only reading, and only what is needed to look things up: records of the
 //! types in simple top-level groups (no nested cell or world groups), their
 //! subrecords, zlib-compressed bodies, and FormIDs resolved to the plugin
-//! that defines them. It never writes a plugin.
+//! that defines them. It only reads; the one plugin the crate writes is
+//! [`crate::hair`]'s patch.
 
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -134,6 +135,11 @@ impl<'a> Iterator for Subrecords<'a> {
 }
 
 impl Record {
+    /// The body as stored after decompressing: every subrecord, back to back.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
     pub fn subrecords(&self) -> Subrecords<'_> {
         Subrecords { d: &self.data, p: 0 }
     }

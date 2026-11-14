@@ -167,6 +167,26 @@ struct ModelMesh {
     underlay: bool,
 }
 
+/// Decoded textures kept between model loads ([`Model::load_cached`]), by the path they were found at. Failures
+/// are kept too, so a texture that can't be read is tried once.
+#[derive(Default)]
+pub struct TextureCache(HashMap<String, Result<Arc<Texture>, String>>);
+
+impl TextureCache {
+    /// How many textures (and failures) it holds.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 /// One mesh of a [`Model`] with what a renderer needs to draw it.
 #[derive(Debug, Clone)]
 pub struct Part<'a> {
@@ -247,8 +267,26 @@ impl Model {
     }
 
     fn load_impl(resolver: &AssetResolver, nif: &Nif, max_texture_side: usize, shaded: bool) -> Model {
+        Self::load_with(resolver, nif, max_texture_side, shaded, &mut TextureCache::default())
+    }
+
+    /// Like [`Self::load`] (or [`Self::load_shaded`]), keeping each decoded texture in `cache`, so a texture that
+    /// several models name (a hair pack's twenty styles share a handful) is found and decoded once. Use one cache
+    /// for one `max_texture_side`.
+    pub fn load_cached(resolver: &AssetResolver, nif: &Nif, max_texture_side: usize, shaded: bool, cache: &mut TextureCache) -> Model {
+        Self::load_with(resolver, nif, max_texture_side, shaded, cache)
+    }
+
+    /// [`Self::from_asset`] with a [`TextureCache`].
+    pub fn from_asset_cached(resolver: &AssetResolver, path: &str, max_texture_side: usize, shaded: bool, cache: &mut TextureCache) -> Result<Option<Model>> {
+        let Some(bytes) = resolver.read_asset(path)? else { return Ok(None) };
+        let nif = nif::parse(&bytes)?;
+        Ok(Some(Model::load_with(resolver, &nif, max_texture_side, shaded, cache)))
+    }
+
+    fn load_with(resolver: &AssetResolver, nif: &Nif, max_texture_side: usize, shaded: bool, texture_cache: &mut TextureCache) -> Model {
         let mut model = Model { warnings: nif.warnings.clone(), ..Model::default() };
-        let mut cache: HashMap<String, Result<Arc<Texture>, String>> = HashMap::new();
+        let cache = &mut texture_cache.0;
         for mesh in nif.meshes.iter().filter(|m| !m.hidden) {
             let mut diffuse = Diffuse::None;
             let mut normal_map = None;
@@ -798,6 +836,25 @@ mod tests {
         let dull = Model::from_meshes(vec![(tri(0.0), Some(Texture::solid([100, 100, 100, 255])))]);
         let flat = Model::from_meshes(vec![(flat, Some(Texture::solid([100, 100, 100, 255])))]);
         assert_eq!(px(&render(&dull, &front(), &opts()), 16, 20), px(&render(&flat, &front(), &opts()), 16, 20));
+    }
+
+    #[test]
+    fn a_texture_cache_decodes_a_shared_texture_once_across_models() {
+        let dir = crate::bsa::tests::temp_dir("render_texture_cache");
+        std::fs::create_dir_all(dir.join("textures/Pack")).unwrap();
+        std::fs::write(dir.join("textures/Pack/Hair.dds"), crate::dds::tests::make_bgra(4, 4, [20, 30, 200, 255])).unwrap();
+        let resolver = AssetResolver::new(&dir, []);
+        let mut mesh = tri(0.0);
+        mesh.textures = vec!["textures\\pack\\hair.dds".into()];
+        let nif = Nif { meshes: vec![mesh], ..Nif::default() };
+        let mut cache = TextureCache::default();
+        let a = Model::load_cached(&resolver, &nif, 256, false, &mut cache);
+        let b = Model::load_cached(&resolver, &nif, 256, false, &mut cache);
+        assert_eq!(cache.len(), 1, "one texture, however many models name it");
+        let (pa, pb) = (a.parts(), b.parts());
+        assert!(Arc::ptr_eq(pa[0].diffuse.as_ref().unwrap(), pb[0].diffuse.as_ref().unwrap()), "the same decoded texture");
+        cache.clear();
+        assert!(cache.is_empty());
     }
 
     #[test]

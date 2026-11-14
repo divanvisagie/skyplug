@@ -73,9 +73,11 @@ a plugin that refits vanilla armours shows the refitted models, and a variant
 with its own texture set (Tartan, Dark) is drawn with it.
 
 It's a software preview for checking shape, texture mapping and colour, not
-the game's renderer: no normal, specular or glow maps and no skin or hair
-tint. Bare-skin shapes bundled in armour files are drawn behind the clothes,
-as the game hides them. Skyrim LE models are refused, and face meshes aren't
+the game's renderer: no normal-mapped lighting, glow or environment maps and no
+skin or hair tint. It does draw a material's shine (a Blinn-Phong highlight from a
+shader with the specular flag, scaled by the normal map's alpha, as the game's
+specular map), so a glossy layer shows as glossy. Bare-skin shapes bundled in armour files are drawn behind the clothes,
+as the game hides them. Skyrim LE models are read too (the game loads them), and face meshes aren't
 drawn.
 
 ### `edit` (TUI)

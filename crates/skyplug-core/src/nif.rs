@@ -2,10 +2,13 @@
 //! draw: positions, normals, UVs, vertex colours, triangles, the texture
 //! paths and the few material flags that decide how it looks.
 //!
-//! Only Skyrim SE's format is read (NIF 20.2.0.7, Bethesda stream version
-//! 100). Skyrim LE's (stream version 83) is recognised and refused with a
-//! [`LegacyFormat`] error, so callers can say "this is an LE mesh" instead
-//! of drawing it wrong. Nothing is written or converted.
+//! Skyrim SE's format is read (NIF 20.2.0.7, Bethesda stream version 100), and
+//! Skyrim LE's (stream version 83) too: the game loads LE models, so a preview
+//! that skipped them would show an outfit with pieces missing. The two differ in
+//! where a skinned shape keeps its vertices (SE: in the skin partition; LE: in
+//! `NiTriShapeData`, with only the weights in the skin partition); everything
+//! else this reads is laid out the same. Other stream versions are refused with a
+//! [`LegacyFormat`] error. Nothing is written or converted.
 //!
 //! What it reads: the node tree (with transforms), `BSTriShape` and its
 //! SE variants, the older `NiTriShape` with `NiTriShapeData`, skinned shapes
@@ -92,6 +95,17 @@ pub struct Alpha {
     pub threshold: u8,
 }
 
+/// The shine of a default-shader (type 0) `BSLightingShaderProperty` that has the specular flag
+/// (shader flags 1, bit 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Specular {
+    pub color: [f32; 3],
+    /// How much of the specular colour is added (0 is none).
+    pub strength: f32,
+    /// The highlight's tightness: higher is smaller and sharper.
+    pub glossiness: f32,
+}
+
 /// One drawable shape.
 #[derive(Debug, Clone, Default)]
 pub struct Mesh {
@@ -111,6 +125,9 @@ pub struct Mesh {
     /// map, 5 skin tint, 6 hair tint, ...), or `None` for other materials.
     pub shader_type: Option<u32>,
     pub alpha: Option<Alpha>,
+    /// The shape's shine, when its shader has the specular flag. The game takes how much of it each
+    /// point gets from the alpha of the normal map ([`slot::NORMAL`]).
+    pub specular: Option<Specular>,
     /// Drawn from both sides.
     pub double_sided: bool,
     /// The file marks the shape hidden; consumers usually skip these.
@@ -423,6 +440,8 @@ struct Geometry {
     skin_bones: Vec<[u8; 4]>,
     /// How many vertices the buffer held, whether or not they had positions.
     vertices: usize,
+    /// An LE skin partition: it holds only the skin (weights and bones), the geometry is in the shape's data.
+    skin_only: bool,
 }
 
 /// Decode a packed SE vertex buffer described by `desc` (see `BSVertexDesc`).
@@ -679,6 +698,70 @@ fn skin_partition(r: &mut Reader) -> Result<Geometry> {
     Ok(g)
 }
 
+/// An LE (stream 83) `NiSkinPartition`: per partition its bones, the vertex map, and per vertex four weights
+/// and four bone indices (local to the partition). There are no positions here; they are in the shape's
+/// `NiTriShapeData`. The result is per shape vertex: weights, and bone indices turned into indices of the
+/// skin instance's bone list, as the SE buffer has them.
+fn skin_partition_le(r: &mut Reader) -> Result<Geometry> {
+    let parts = r.u32()? as usize;
+    r.fits(parts, 12)?;
+    let mut g = Geometry { skin_only: true, ..Geometry::default() };
+    for _ in 0..parts {
+        let nv = r.u16()? as usize;
+        let nt = r.u16()? as usize;
+        let nb = r.u16()? as usize;
+        let ns = r.u16()? as usize;
+        let nw = r.u16()? as usize;
+        r.fits(nb, 2)?;
+        let bones: Vec<u16> = (0..nb).map(|_| r.u16()).collect::<Result<_>>()?;
+        let vertex_map: Option<Vec<usize>> = if r.u8()? != 0 {
+            r.fits(nv, 2)?;
+            Some((0..nv).map(|_| r.u16().map(|v| v as usize)).collect::<Result<_>>()?)
+        } else {
+            None
+        };
+        let weights: Option<Vec<f32>> = if r.u8()? != 0 {
+            r.fits(nv.checked_mul(nw).context("count overflow")?, 4)?;
+            Some((0..nv * nw).map(|_| r.f32()).collect::<Result<_>>()?)
+        } else {
+            None
+        };
+        r.fits(ns, 2)?;
+        let strips: usize = (0..ns).map(|_| r.u16().map(|v| v as usize)).sum::<Result<_>>()?;
+        if r.u8()? != 0 {
+            r.skip(if ns > 0 { strips * 2 } else { nt * 6 })?; // this partition's triangles or strips
+        }
+        let indices: Option<Vec<u8>> = if r.u8()? != 0 {
+            r.fits(nv.checked_mul(nw).context("count overflow")?, 1)?;
+            Some(r.take(nv * nw)?.to_vec())
+        } else {
+            None
+        };
+        r.skip(2)?; // LOD level and a flag
+        let (Some(weights), Some(indices)) = (weights, indices) else { continue };
+        ensure!(nw > 0 && nw <= 4, "{nw} weights per vertex");
+        for k in 0..nv {
+            let at = vertex_map.as_ref().map_or(k, |m| m[k]);
+            ensure!(at < 65536, "vertex map entry out of range");
+            if g.skin_weights.len() <= at {
+                g.skin_weights.resize(at + 1, [0.0; 4]);
+                g.skin_bones.resize(at + 1, [0; 4]);
+            }
+            let mut w = [0.0f32; 4];
+            let mut b = [0u8; 4];
+            for j in 0..nw {
+                w[j] = weights[k * nw + j];
+                let local = indices[k * nw + j] as usize;
+                b[j] = u8::try_from(*bones.get(local).context("bone index outside the partition's bones")?).context("bone index above 255")?;
+            }
+            g.skin_weights[at] = w;
+            g.skin_bones[at] = b;
+        }
+    }
+    ensure!(r.left() == 0, "{} bytes left over", r.left());
+    Ok(g)
+}
+
 struct Node {
     av: AvObject,
     children: Vec<i32>,
@@ -707,13 +790,13 @@ enum Block {
     /// Each bone's bind transform: from the skin's space to the bone's.
     SkinData(Vec<Transform>),
     SkinPartition(Geometry),
-    Lighting { shader_type: u32, flags2: u32, texture_set: i32 },
+    Lighting { shader_type: u32, flags2: u32, texture_set: i32, specular: Option<Specular> },
     Effect { flags2: u32, texture: String },
     TextureSet(Vec<String>),
     Alpha(Alpha),
 }
 
-fn parse_block(ty: &str, data: &[u8], strings: &[String]) -> Result<Option<Block>> {
+fn parse_block(ty: &str, data: &[u8], strings: &[String], le: bool) -> Result<Option<Block>> {
     let mut r = Reader::new(data);
     let r = &mut r;
     Ok(Some(match ty {
@@ -741,14 +824,31 @@ fn parse_block(ty: &str, data: &[u8], strings: &[String]) -> Result<Option<Block
             Block::SkinInstance { data, partition, bones, parts }
         }
         "NiSkinData" => Block::SkinData(skin_data(r)?),
-        "NiSkinPartition" => Block::SkinPartition(skin_partition(r)?),
+        "NiSkinPartition" => Block::SkinPartition(if le { skin_partition_le(r)? } else { skin_partition(r)? }),
         "BSLightingShaderProperty" => {
             let shader_type = r.u32()?;
             object_net(r, strings)?;
-            r.u32()?; // shader flags 1
+            let flags1 = r.u32()?;
             let flags2 = r.u32()?;
             r.skip(16)?; // UV offset and scale
-            Block::Lighting { shader_type, flags2, texture_set: r.i32()? }
+            let texture_set = r.i32()?;
+            // Emissive colour (3 floats), emissive multiple, clamp mode, alpha and refraction (28 bytes),
+            // then glossiness, specular colour and specular strength. Checked on vanilla armour:
+            // glossiness 80, colour (1, 1, 1), strength 1. A block too short to hold it (some tools write
+            // less) just has none.
+            let specular = (|| -> Result<Option<Specular>> {
+                r.skip(28)?;
+                let glossiness = r.f32()?;
+                let color = [r.f32()?, r.f32()?, r.f32()?];
+                let strength = r.f32()?;
+                // Only the default shader (type 0) has the shine drawn here: its strength is the normal
+                // map's alpha. Skin, hair and the rest take it from other maps (skin has model-space
+                // normals and a specular map of its own, and a specular colour like (1, 1, 3) on purpose).
+                let color = color.map(|c| c.clamp(0.0, 1.0));
+                Ok((flags1 & 1 != 0 && shader_type == 0).then_some(Specular { color, strength, glossiness }))
+            })()
+            .unwrap_or(None);
+            Block::Lighting { shader_type, flags2, texture_set, specular }
         }
         "BSEffectShaderProperty" => {
             object_net(r, strings)?;
@@ -796,7 +896,7 @@ pub fn parse(bytes: &[u8]) -> Result<Nif> {
         return Err(LegacyFormat { bs_version: 0 }.into());
     }
     let bs_version = r.u32()?;
-    if bs_version != BS_SSE {
+    if bs_version != BS_SSE && bs_version != BS_LE {
         return Err(LegacyFormat { bs_version }.into());
     }
     r.short()?; // author
@@ -828,7 +928,7 @@ pub fn parse(bytes: &[u8]) -> Result<Nif> {
     for i in 0..block_count {
         let ty = types.get(type_of[i]).map(String::as_str).context("block has an unknown type index")?;
         let data = r.take(sizes[i])?;
-        match parse_block(ty, data, &strings) {
+        match parse_block(ty, data, &strings, bs_version == BS_LE) {
             Ok(b) => {
                 if b.is_none() && looks_visible(ty) {
                     unsupported.insert(ty.to_string());
@@ -937,6 +1037,18 @@ fn build_mesh<'a>(
     } else if skinned {
         match get(s.skin) {
             Some(Block::SkinInstance { partition, .. }) => match get(*partition) {
+                // LE: the vertices are in the shape's data, the partition adds the weights and bones.
+                Some(Block::SkinPartition(g)) if g.skin_only => match get(s.data) {
+                    Some(Block::TriData(d)) => {
+                        let mut d = d.clone();
+                        d.skin_weights = g.skin_weights.clone();
+                        d.skin_bones = g.skin_bones.clone();
+                        d.skin_weights.resize(d.positions.len(), [0.0; 4]);
+                        d.skin_bones.resize(d.positions.len(), [0; 4]);
+                        Some(d)
+                    }
+                    _ => None,
+                },
                 Some(Block::SkinPartition(g)) => Some(g.clone()),
                 _ => None,
             },
@@ -1010,8 +1122,9 @@ fn build_mesh<'a>(
         }
     }
     match get(s.shader) {
-        Some(Block::Lighting { shader_type, flags2, texture_set }) => {
+        Some(Block::Lighting { shader_type, flags2, texture_set, specular }) => {
             m.shader_type = Some(*shader_type);
+            m.specular = *specular;
             m.double_sided = flags2 & 0x10 != 0;
             if let Some(Block::TextureSet(t)) = get(*texture_set) {
                 m.textures = t.clone();
@@ -1184,6 +1297,24 @@ pub(crate) mod tests {
         o
     }
 
+    /// A lighting shader with the specular flag set and its shine values.
+    fn lighting_shiny(texture_set: i32, glossiness: f32, color: [f32; 3], strength: f32) -> Vec<u8> {
+        let mut o = vec![];
+        u32le(&mut o, 0);
+        o.extend_from_slice(&(-1i32).to_le_bytes());
+        u32le(&mut o, 0);
+        o.extend_from_slice(&(-1i32).to_le_bytes());
+        u32le(&mut o, 1); // shader flags 1: specular
+        u32le(&mut o, 0);
+        o.extend_from_slice(&[0u8; 16]);
+        o.extend_from_slice(&texture_set.to_le_bytes());
+        o.extend_from_slice(&[0u8; 28]); // emissive colour and multiple, clamp mode, alpha, refraction
+        for f in [glossiness, color[0], color[1], color[2], strength] {
+            o.extend_from_slice(&f.to_le_bytes());
+        }
+        o
+    }
+
     fn alpha(flags: u16, threshold: u8) -> Vec<u8> {
         let mut o = vec![];
         o.extend_from_slice(&(-1i32).to_le_bytes());
@@ -1224,7 +1355,44 @@ pub(crate) mod tests {
         assert_eq!(m.shader_type, Some(5));
         assert!(m.double_sided && !m.skinned && !m.hidden);
         assert_eq!(m.alpha, Some(Alpha { blend: true, test: true, threshold: 128 }));
+        assert_eq!(m.specular, None, "no specular flag, no shine");
         assert_eq!(nif.bounds(), Some(([10.0, 5.0, 0.0], [11.0, 6.0, 0.0])));
+    }
+
+    #[test]
+    fn skin_and_other_shader_types_get_no_shine_drawn() {
+        let mut shader = lighting_shiny(3, 1.0, [1.0, 1.0, 3.0], 0.4);
+        shader[..4].copy_from_slice(&5u32.to_le_bytes()); // shader type 5: skin tint
+        let bytes = file(
+            100,
+            &["Root", "Tri"],
+            &[
+                ("NiNode", ni_node(0, [0.0; 3], &[1], None)),
+                ("BSTriShape", bs_tri_shape_block(1, [0.0; 3], -1, 2, 3, true)),
+                ("BSLightingShaderProperty", shader),
+                ("BSShaderTextureSet", texture_set(&["textures\\a\\d.dds", "textures\\a\\n.dds"])),
+            ],
+        );
+        let nif = parse(&bytes).unwrap();
+        assert_eq!(nif.meshes[0].shader_type, Some(5));
+        assert_eq!(nif.meshes[0].specular, None);
+    }
+
+    #[test]
+    fn reads_the_shine_of_a_shader_with_the_specular_flag() {
+        let bytes = file(
+            100,
+            &["Root", "Tri"],
+            &[
+                ("NiNode", ni_node(0, [0.0; 3], &[1], None)),
+                ("BSTriShape", bs_tri_shape_block(1, [0.0; 3], -1, 2, 3, true)),
+                ("BSLightingShaderProperty", lighting_shiny(3, 0.2, [0.5, 0.25, 1.0], 0.75)),
+                ("BSShaderTextureSet", texture_set(&["textures\\a\\d.dds", "textures\\a\\n.dds"])),
+            ],
+        );
+        let nif = parse(&bytes).unwrap();
+        assert!(nif.warnings.is_empty(), "{:?}", nif.warnings);
+        assert_eq!(nif.meshes[0].specular, Some(Specular { color: [0.5, 0.25, 1.0], strength: 0.75, glossiness: 0.2 }));
     }
 
     #[test]
@@ -1396,14 +1564,55 @@ pub(crate) mod tests {
             data.extend_from_slice(&i.to_le_bytes());
         }
         data.extend_from_slice(&0u16.to_le_bytes()); // match groups
-        let bytes = file(100, &["Old"], &[("NiTriShape", shape), ("NiTriShapeData", data)]);
+        for stream in [100, 83] {
+        let bytes = file(stream, &["Old"], &[("NiTriShape", shape.clone()), ("NiTriShapeData", data.clone())]);
         let nif = parse(&bytes).unwrap();
         assert!(nif.warnings.is_empty(), "{:?}", nif.warnings);
         let m = &nif.meshes[0];
-        assert_eq!(m.positions[1], [2.0, 0.0, 0.0], "scale is baked in");
+        assert_eq!(m.positions[1], [2.0, 0.0, 0.0], "scale is baked in (stream {stream})");
         assert_eq!(m.triangles, [[0, 2, 1]]);
         assert_eq!(m.uvs.len(), 3);
         assert!(m.hidden);
+        }
+    }
+
+    #[test]
+    fn an_le_skin_partition_gives_weights_and_global_bones_per_shape_vertex() {
+        // One partition over 3 vertices, its bones [5, 7], the vertex map reversing the vertices.
+        let mut b = vec![];
+        u32le(&mut b, 1);
+        for v in [3u16, 1, 2, 0, 4] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for bone in [5u16, 7] {
+            b.extend_from_slice(&bone.to_le_bytes());
+        }
+        b.push(1);
+        for v in [2u16, 1, 0] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.push(1);
+        for k in 0..3 {
+            for w in [0.75f32, 0.25, 0.0, 0.0] {
+                f32le(&mut b, if k == 1 { 1.0 - w } else { w });
+            }
+        }
+        b.push(1); // has faces: this partition's one triangle, local indices
+        for i in [0u16, 1, 2] {
+            b.extend_from_slice(&i.to_le_bytes());
+        }
+        b.push(1);
+        for k in 0..3u8 {
+            b.extend_from_slice(&[k % 2, (k + 1) % 2, 0, 0]);
+        }
+        b.extend_from_slice(&[0, 0]); // LOD level and a flag
+        let g = skin_partition_le(&mut Reader::new(&b)).unwrap();
+        // Partition vertex 0 is shape vertex 2: bones local [0, 1] are the skin's [5, 7].
+        assert_eq!(g.skin_bones[2], [5, 7, 5, 5]);
+        assert_eq!(g.skin_weights[2], [0.75, 0.25, 0.0, 0.0]);
+        assert_eq!(g.skin_bones[1], [7, 5, 5, 5]);
+        assert_eq!(g.skin_weights[0], [0.75, 0.25, 0.0, 0.0]);
+        assert!(g.skin_only && g.positions.is_empty());
     }
 
     #[test]
@@ -1423,11 +1632,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn legacy_and_foreign_files_are_recognised_not_parsed() {
-        let le = file(83, &[], &[("NiNode", ni_node(-1, [0.0; 3], &[], None))]);
-        let e = parse(&le).unwrap_err();
-        assert_eq!(e.downcast_ref::<LegacyFormat>(), Some(&LegacyFormat { bs_version: 83 }));
-        assert!(e.to_string().contains("Skyrim LE"));
+    fn other_versions_and_foreign_files_are_recognised_not_parsed() {
+        let fo4 = file(130, &[], &[("NiNode", ni_node(-1, [0.0; 3], &[], None))]);
+        let e = parse(&fo4).unwrap_err();
+        assert_eq!(e.downcast_ref::<LegacyFormat>(), Some(&LegacyFormat { bs_version: 130 }));
+        assert!(e.to_string().contains("isn't Skyrim SE's"));
+        assert!(parse(&file(83, &[], &[("NiNode", ni_node(-1, [0.0; 3], &[], None))])).is_ok(), "LE is read");
         assert!(parse(b"not a nif at all").is_err());
         assert!(parse(b"").is_err());
     }

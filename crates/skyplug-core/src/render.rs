@@ -4,8 +4,11 @@
 //!
 //! It is for checking, not for matching the game. It shows shape, texture
 //! mapping, colours, transparency and which file a texture came from. It
-//! doesn't do the game's shading: no normal, specular, glow or environment
-//! maps, no skin or hair tint, no vertex colours, no shadows.
+//! doesn't do the game's shading: no normal, glow or environment maps, no skin
+//! or hair tint, no vertex colours, no shadows. The one thing it does take from
+//! the shader is the shine: a Blinn-Phong highlight from a shader with the
+//! specular flag, its strength read from the normal map's alpha (the game's
+//! specular map), so a glossy material with no map shows as glossy here too.
 //!
 //! Orthographic camera, z-buffer, backface culling for single-sided
 //! materials, alpha test and alpha blending as the mesh's `NiAlphaProperty`
@@ -157,8 +160,25 @@ enum Diffuse {
 struct ModelMesh {
     mesh: Mesh,
     diffuse: Diffuse,
+    /// The normal map, loaded for a shiny mesh or when the model was loaded for shading ([`Model::load_shaded`]):
+    /// its alpha is how much shine each point gets.
+    normal_map: Option<Arc<Texture>>,
     /// Drawn behind anything else that's about as deep (see [`Options::garment_bias`]).
     underlay: bool,
+}
+
+/// One mesh of a [`Model`] with what a renderer needs to draw it.
+#[derive(Debug, Clone)]
+pub struct Part<'a> {
+    pub mesh: &'a Mesh,
+    /// The diffuse map, or `None` when the mesh has none (draw it grey) or it couldn't be loaded
+    /// (`diffuse_broken`; draw it magenta so it can't be missed).
+    pub diffuse: Option<Arc<Texture>>,
+    pub diffuse_broken: bool,
+    /// The normal map, when loaded ([`Model::load_shaded`], or any shiny mesh's). Its alpha is the specular map.
+    pub normal_map: Option<Arc<Texture>>,
+    /// Bare skin bundled in an armour, or the installed body: drawn behind the clothes.
+    pub underlay: bool,
 }
 
 /// Meshes with their textures loaded, ready to render.
@@ -200,15 +220,38 @@ fn resolve_texture(resolver: &AssetResolver, path: &str) -> (String, Option<crat
     }
 }
 
+/// Decode a found texture at most about `max_texture_side` pixels on a side.
+fn decode_texture(resolver: &AssetResolver, found: &crate::assets::Resolved, max_texture_side: usize) -> Result<Arc<Texture>, String> {
+    resolver
+        .read(&found.winner)
+        .and_then(|b| {
+            let d = Dds::parse(&b)?;
+            d.decode(d.level_for(max_texture_side))
+        })
+        .map(|i| Arc::new(Texture::from(i)))
+        .map_err(|e| format!("{e:#}"))
+}
+
 impl Model {
     /// Load the diffuse texture of each mesh of `nif` through `resolver`, at
     /// most about `max_texture_side` pixels on a side (so big textures decode
     /// at a smaller mip level), and report where every texture came from.
     pub fn load(resolver: &AssetResolver, nif: &Nif, max_texture_side: usize) -> Model {
+        Self::load_impl(resolver, nif, max_texture_side, false)
+    }
+
+    /// Like [`Self::load`], and every mesh's normal map is decoded too (see [`Part::normal_map`]), for a
+    /// renderer that shades with it. The CPU renderer doesn't need them, so [`Self::load`] skips them.
+    pub fn load_shaded(resolver: &AssetResolver, nif: &Nif, max_texture_side: usize) -> Model {
+        Self::load_impl(resolver, nif, max_texture_side, true)
+    }
+
+    fn load_impl(resolver: &AssetResolver, nif: &Nif, max_texture_side: usize, shaded: bool) -> Model {
         let mut model = Model { warnings: nif.warnings.clone(), ..Model::default() };
         let mut cache: HashMap<String, Result<Arc<Texture>, String>> = HashMap::new();
         for mesh in nif.meshes.iter().filter(|m| !m.hidden) {
             let mut diffuse = Diffuse::None;
+            let mut normal_map = None;
             for (slot, authored) in mesh.textures.iter().enumerate().filter(|(_, p)| !p.is_empty()) {
                 let (path, found) = resolve_texture(resolver, authored);
                 let result = match found {
@@ -223,19 +266,17 @@ impl Model {
                             source: resolver.describe(&found.winner),
                             hides: found.shadowed.iter().map(|s| resolver.describe(s)).collect(),
                         };
-                        if slot != nif::slot::DIFFUSE {
+                        if slot == nif::slot::NORMAL && (mesh.specular.is_some() || shaded) {
+                            // The CPU renderer reads only its alpha, as the shine's strength; a shaded load keeps it whole.
+                            let loaded = cache.entry(found.path.clone()).or_insert_with(|| decode_texture(resolver, &found, max_texture_side));
+                            if let Ok(t) = loaded {
+                                normal_map = Some(t.clone());
+                            }
+                            source
+                        } else if slot != nif::slot::DIFFUSE {
                             source
                         } else {
-                            let loaded = cache.entry(found.path.clone()).or_insert_with(|| {
-                                resolver
-                                    .read(&found.winner)
-                                    .and_then(|b| {
-                                        let d = Dds::parse(&b)?;
-                                        d.decode(d.level_for(max_texture_side))
-                                    })
-                                    .map(|i| Arc::new(Texture::from(i)))
-                                    .map_err(|e| format!("{e:#}"))
-                            });
+                            let loaded = cache.entry(found.path.clone()).or_insert_with(|| decode_texture(resolver, &found, max_texture_side));
                             match loaded {
                                 Ok(t) => {
                                     diffuse = Diffuse::Texture(t.clone());
@@ -255,9 +296,17 @@ impl Model {
             // Shapes with the skin-tint shader are bare skin: a body, hands or feet bundled in an
             // armour file. Treat them as the body underlay so clothes drawn over them show.
             let underlay = mesh.shader_type == Some(SHADER_SKIN_TINT);
-            model.meshes.push(ModelMesh { mesh: mesh.clone(), diffuse, underlay });
+            model.meshes.push(ModelMesh { mesh: mesh.clone(), diffuse, normal_map, underlay });
         }
         model
+    }
+
+    /// Read the model at `path` (a game asset path) and load it. `None` if
+    /// the game has no such file.
+    pub fn from_asset_shaded(resolver: &AssetResolver, path: &str, max_texture_side: usize) -> Result<Option<Model>> {
+        let Some(bytes) = resolver.read_asset(path)? else { return Ok(None) };
+        let nif = nif::parse(&bytes)?;
+        Ok(Some(Model::load_shaded(resolver, &nif, max_texture_side)))
     }
 
     /// Read the model at `path` (a game asset path) and load it. `None` if
@@ -272,7 +321,7 @@ impl Model {
     pub fn from_meshes(meshes: Vec<(Mesh, Option<Texture>)>) -> Model {
         let meshes = meshes
             .into_iter()
-            .map(|(mesh, t)| ModelMesh { mesh, diffuse: t.map_or(Diffuse::None, |t| Diffuse::Texture(Arc::new(t))), underlay: false })
+            .map(|(mesh, t)| ModelMesh { mesh, diffuse: t.map_or(Diffuse::None, |t| Diffuse::Texture(Arc::new(t))), normal_map: None, underlay: false })
             .collect();
         Model { meshes, ..Model::default() }
     }
@@ -319,6 +368,24 @@ impl Model {
             m.mesh = posed;
         }
         report
+    }
+
+    /// What a renderer of its own needs to draw each mesh: the mesh, its diffuse and normal maps, and
+    /// whether it is the body underlay. In draw order of the file; posed meshes are as [`Self::pose`] left them.
+    pub fn parts(&self) -> Vec<Part<'_>> {
+        self.meshes
+            .iter()
+            .map(|m| Part {
+                mesh: &m.mesh,
+                diffuse: match &m.diffuse {
+                    Diffuse::Texture(t) => Some(t.clone()),
+                    _ => None,
+                },
+                diffuse_broken: matches!(m.diffuse, Diffuse::Broken),
+                normal_map: m.normal_map.clone(),
+                underlay: m.underlay,
+            })
+            .collect()
     }
 
     /// Number of meshes that will be drawn.
@@ -566,6 +633,23 @@ fn draw(f: &mut Frame, view: &View, m: &ModelMesh, write_depth: bool, garment_bi
                 for ch in &mut rgba[..3] {
                     *ch *= lit;
                 }
+                // The shine of a shader with the specular flag: a Blinn-Phong highlight, scaled by the
+                // normal map's alpha where there is one (the game's specular map) and by full where not.
+                if let Some(sp) = mesh.specular {
+                    let half = norm(add_scaled(light, view.toward, 1.0));
+                    let spec_map = match &m.normal_map {
+                        Some(t) if has_uv => {
+                            let u = w0 * mesh.uvs[ia][0] + w1 * mesh.uvs[ib][0] + w2 * mesh.uvs[ic][0];
+                            let v = w0 * mesh.uvs[ia][1] + w1 * mesh.uvs[ib][1] + w2 * mesh.uvs[ic][1];
+                            t.sample(u, v)[3] / 255.0
+                        }
+                        _ => 1.0,
+                    };
+                    let shine = dot(n, half).max(0.0).powf(sp.glossiness.max(1.0)) * sp.strength * spec_map;
+                    for (k, ch) in rgba[..3].iter_mut().enumerate() {
+                        *ch = (*ch + shine * sp.color[k] * 255.0).min(255.0);
+                    }
+                }
                 let dst = f.color[i];
                 if alpha >= 1.0 {
                     f.color[i] = [rgba[0], rgba[1], rgba[2], 255.0];
@@ -694,6 +778,26 @@ mod tests {
         assert!(matches!(model.meshes[1].diffuse, Diffuse::Texture(_)), "and drawn with it");
         assert_eq!(*result(2), TextureResult::Missing);
         assert_eq!(model.textures[2].path, "pack\\gone.dds", "a missing one is reported as written");
+    }
+
+    #[test]
+    fn a_shiny_mesh_gets_a_highlight_and_a_dull_one_does_not() {
+        let grey = || Some(Texture::solid([100, 100, 100, 255]));
+        let dull = Model::from_meshes(vec![(tri(0.0), grey())]);
+        let mut shiny = tri(0.0);
+        shiny.specular = Some(crate::nif::Specular { color: [1.0; 3], strength: 1.0, glossiness: 1.0 });
+        let shiny = Model::from_meshes(vec![(shiny, grey())]);
+        let (a, b) = (px(&render(&dull, &front(), &opts()), 16, 20), px(&render(&shiny, &front(), &opts()), 16, 20));
+        assert!(b[0] > a[0] + 20, "dull {a:?}, shiny {b:?}");
+    }
+
+    #[test]
+    fn no_strength_no_shine() {
+        let mut flat = tri(0.0);
+        flat.specular = Some(crate::nif::Specular { color: [1.0; 3], strength: 0.0, glossiness: 1.0 });
+        let dull = Model::from_meshes(vec![(tri(0.0), Some(Texture::solid([100, 100, 100, 255])))]);
+        let flat = Model::from_meshes(vec![(flat, Some(Texture::solid([100, 100, 100, 255])))]);
+        assert_eq!(px(&render(&dull, &front(), &opts()), 16, 20), px(&render(&flat, &front(), &opts()), 16, 20));
     }
 
     #[test]

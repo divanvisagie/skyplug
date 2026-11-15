@@ -68,6 +68,28 @@ struct Arma {
     slots: u32,
 }
 
+/// A name as a record holds it: the text, or a string table ID in a localized plugin.
+#[derive(Debug, Clone)]
+enum RawText {
+    Text(String),
+    Id(u32),
+}
+
+/// A magic effect (`MGEF`) or an enchantment (`ENCH`): both have a name and an editor ID, and
+/// an enchantment has effects.
+#[derive(Debug, Clone)]
+struct Magic {
+    /// The plugin the record was read from, whose string table holds a localized name.
+    file: String,
+    editor_id: String,
+    name: Option<RawText>,
+    /// For an enchantment: each effect's record, magnitude and duration.
+    effects: Vec<(FormKey, f32, u32)>,
+}
+
+/// String tables by plugin name, read when first needed while resolving names.
+type StringTables = HashMap<String, Option<HashMap<u32, String>>>;
+
 /// Which body a model is for: armours have a mesh for women and one for men.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BodySex {
@@ -95,8 +117,48 @@ pub struct ModelSet {
     pub alt_textures: Vec<Vec<AltTexture>>,
 }
 
+/// Light, heavy or clothing: the armour type in the second field of `BOD2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArmourKind {
+    Light,
+    Heavy,
+    Clothing,
+}
+
+/// One effect of an enchantment, as the game lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnchantEffect {
+    /// The magic effect's name ("Fortify Sneak"), or its editor ID if it has none.
+    pub name: String,
+    pub magnitude: f32,
+    /// In seconds; 0 for an effect that lasts as long as the item is worn.
+    pub duration: u32,
+}
+
+/// What an armour is enchanted with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Enchantment {
+    /// The enchantment's name, or its editor ID if it has none (most vanilla ones have none).
+    pub name: String,
+    pub effects: Vec<EnchantEffect>,
+}
+
+/// What the game says about an armour: what its record holds besides what it looks like.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ArmourStats {
+    pub kind: Option<ArmourKind>,
+    /// The armour rating as the game shows it (the record stores it times 100).
+    pub rating: f32,
+    pub weight: f32,
+    /// The base value, in gold.
+    pub value: u32,
+    /// The editor IDs of its keywords (`ArmorMaterialIron`, `ArmorCuirass`, ...).
+    pub keywords: Vec<String>,
+    pub enchantment: Option<Enchantment>,
+}
+
 /// An armour record and what it's worn as.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Armour {
     pub key: FormKey,
     /// The plugin this entry was read from (it may only override the record).
@@ -114,6 +176,8 @@ pub struct Armour {
     pub male: ModelSet,
     /// Armatures it lists that no loaded plugin defines.
     pub missing_armatures: usize,
+    /// Its value, weight, armour rating, type, keywords and enchantment.
+    pub stats: ArmourStats,
 }
 
 const SLOT_NAMES: [&str; 14] =
@@ -152,6 +216,9 @@ pub struct ArmourCatalog {
     /// Plugins in load order.
     plugins: Vec<PluginFile>,
     armas: HashMap<FormKey, Arma>,
+    /// Keyword editor IDs, and the enchantments and magic effects, by record.
+    keywords: HashMap<FormKey, String>,
+    magic: HashMap<FormKey, Magic>,
     /// Texture sets (`TXST`), each as the `TX00`..`TX07` paths by NIF texture slot (see [`TXST_TO_NIF_SLOT`]).
     texture_sets: HashMap<FormKey, Vec<String>>,
     /// Plugins that couldn't be read, and records skipped, with why.
@@ -163,6 +230,7 @@ impl ArmourCatalog {
     /// Read the `ARMA` records of `plugins`, given in load order.
     pub fn new(plugins: Vec<PluginFile>) -> Self {
         let mut armas = HashMap::new();
+        let (mut keywords, mut magic) = (HashMap::new(), HashMap::new());
         let mut texture_sets = HashMap::new();
         let mut problems = Vec::new();
         for plugin in &plugins {
@@ -172,6 +240,25 @@ impl ArmourCatalog {
                         for r in &list.records {
                             let (plugin_name, id) = plugin.resolve(r.form_id);
                             texture_sets.insert(FormKey { plugin: plugin_name, id }, read_texture_set(r));
+                        }
+                    }
+                    Err(e) => problems.push(format!("{}: {e:#}", plugin.name)),
+                }
+            }
+            for label in [b"KYWD", b"ENCH", b"MGEF"] {
+                if !plugin.has_group(label) {
+                    continue;
+                }
+                match plugin.records(label) {
+                    Ok(list) => {
+                        for r in &list.records {
+                            let (plugin_name, id) = plugin.resolve(r.form_id);
+                            let key = FormKey { plugin: plugin_name, id };
+                            if label == b"KYWD" {
+                                keywords.insert(key, r.editor_id().unwrap_or_default());
+                            } else {
+                                magic.insert(key, read_magic(plugin, r));
+                            }
                         }
                     }
                     Err(e) => problems.push(format!("{}: {e:#}", plugin.name)),
@@ -191,7 +278,7 @@ impl ArmourCatalog {
                 Err(e) => problems.push(format!("{}: {e:#}", plugin.name)),
             }
         }
-        ArmourCatalog { plugins, armas, texture_sets, problems, language: "english".into() }
+        ArmourCatalog { plugins, armas, keywords, magic, texture_sets, problems, language: "english".into() }
     }
 
     /// Open the plugins named in `load_order` (lowest first) from `data_dir`. Names with no
@@ -257,7 +344,8 @@ impl ArmourCatalog {
             .with_context(|| format!("{plugin} isn't in the load order"))?;
         let list = file.records(b"ARMO")?;
         let strings = if file.is_localized() { resolver.and_then(|r| self.string_table(r, file)) } else { None };
-        let mut out: Vec<Armour> = list.records.iter().map(|r| self.read_armour(file, r, strings.as_ref())).collect();
+        let mut tables = StringTables::new();
+        let mut out: Vec<Armour> = list.records.iter().map(|r| self.read_armour(file, r, strings.as_ref(), resolver, &mut tables)).collect();
         out.sort_by_cached_key(|a| a.label().to_lowercase());
         Ok(out)
     }
@@ -308,16 +396,90 @@ impl ArmourCatalog {
         parse_strings(&bytes)
     }
 
-    fn read_armour(&self, file: &PluginFile, r: &Record, strings: Option<&HashMap<u32, String>>) -> Armour {
+    /// A name from a record of `file`, from its string table if it is an ID.
+    fn text(&self, raw: &RawText, file: &str, resolver: Option<&AssetResolver>, tables: &mut StringTables) -> Option<String> {
+        let text = match raw {
+            RawText::Text(t) => t.clone(),
+            RawText::Id(id) => tables
+                .entry(file.to_ascii_lowercase())
+                .or_insert_with(|| {
+                    let f = self.plugins.iter().find(|p| p.name.eq_ignore_ascii_case(file))?;
+                    self.string_table(resolver?, f)
+                })
+                .as_ref()?
+                .get(id)
+                .cloned()?,
+        };
+        // A string ID left where text should be isn't a name.
+        (!text.is_empty() && !text.chars().any(char::is_control)).then_some(text)
+    }
+
+    fn enchantment(&self, key: &FormKey, resolver: Option<&AssetResolver>, tables: &mut StringTables) -> Option<Enchantment> {
+        let ench = self.magic.get(key)?;
+        let name = ench.name.as_ref().and_then(|n| self.text(n, &ench.file, resolver, tables)).unwrap_or_else(|| ench.editor_id.clone());
+        let effects = ench
+            .effects
+            .iter()
+            .map(|(effect, magnitude, duration)| {
+                let name = self.magic.get(effect).map(|m| {
+                    m.name.as_ref().and_then(|n| self.text(n, &m.file, resolver, tables)).unwrap_or_else(|| m.editor_id.clone())
+                });
+                EnchantEffect { name: name.unwrap_or_else(|| format!("{:06X}", effect.id)), magnitude: *magnitude, duration: *duration }
+            })
+            .collect();
+        Some(Enchantment { name, effects })
+    }
+
+    fn read_armour(
+        &self,
+        file: &PluginFile,
+        r: &Record,
+        strings: Option<&HashMap<u32, String>>,
+        resolver: Option<&AssetResolver>,
+        tables: &mut StringTables,
+    ) -> Armour {
         let (plugin, id) = file.resolve(r.form_id);
         let key = FormKey { plugin, id };
         let (mut name, mut slots) = (None, 0);
         let mut addons = Vec::new();
+        let mut stats = ArmourStats::default();
+        let mut enchantment = None;
+        let form_key = |f: u32| {
+            let (plugin, id) = file.resolve(f);
+            FormKey { plugin, id }
+        };
         for s in r.subrecords() {
+            let (u32_at, f32_at) = (
+                |o: usize| s.data.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())),
+                |o: usize| s.data.get(o..o + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())),
+            );
             match &s.kind {
                 b"FULL" if file.is_localized() => name = s.u32().and_then(|i| strings?.get(&i).cloned()),
                 b"FULL" => name = Some(s.string()),
-                b"BOD2" | b"BODT" => slots = s.u32().unwrap_or(0),
+                b"BOD2" => {
+                    slots = s.u32().unwrap_or(0);
+                    stats.kind = match u32_at(4) {
+                        Some(0) => Some(ArmourKind::Light),
+                        Some(1) => Some(ArmourKind::Heavy),
+                        Some(2) => Some(ArmourKind::Clothing),
+                        _ => None,
+                    };
+                }
+                b"BODT" => slots = s.u32().unwrap_or(0),
+                b"DATA" => {
+                    stats.value = u32_at(0).unwrap_or(0);
+                    stats.weight = f32_at(4).unwrap_or(0.0);
+                }
+                b"DNAM" => stats.rating = u32_at(0).map_or(0.0, |v| v as i32 as f32 / 100.0),
+                b"KWDA" => {
+                    for i in 0..s.data.len() / 4 {
+                        if let Some(word) = u32_at(i * 4) {
+                            let key = form_key(word);
+                            stats.keywords.push(self.keywords.get(&key).cloned().unwrap_or_else(|| format!("{:06X}", key.id)));
+                        }
+                    }
+                }
+                b"EITM" => enchantment = s.u32().map(form_key),
                 b"MODL" => addons.extend(s.u32().map(|f| {
                     let (plugin, id) = file.resolve(f);
                     FormKey { plugin, id }
@@ -356,6 +518,7 @@ impl ArmourCatalog {
             out
         };
         let (female, male) = (set(BodySex::Female), set(BodySex::Male));
+        stats.enchantment = enchantment.and_then(|key| self.enchantment(&key, resolver, tables));
         Armour {
             defined_in: self.defined_in(&key),
             plugin: file.name.clone(),
@@ -366,12 +529,39 @@ impl ArmourCatalog {
             female,
             male,
             missing_armatures,
+            stats,
         }
     }
 }
 
 fn is_beast_race(k: &FormKey) -> bool {
     k.plugin == SKYRIM_ESM && BEAST_RACES.contains(&k.id)
+}
+
+/// An enchantment's or a magic effect's name and, for an enchantment, its effects.
+fn read_magic(plugin: &PluginFile, r: &Record) -> Magic {
+    let mut magic = Magic { file: plugin.name.clone(), editor_id: r.editor_id().unwrap_or_default(), name: None, effects: Vec::new() };
+    for s in r.subrecords() {
+        match &s.kind {
+            b"FULL" if plugin.is_localized() => magic.name = s.u32().map(RawText::Id),
+            b"FULL" => magic.name = Some(RawText::Text(s.string())),
+            b"EFID" => {
+                if let Some(f) = s.u32() {
+                    let (plugin_name, id) = plugin.resolve(f);
+                    magic.effects.push((FormKey { plugin: plugin_name, id }, 0.0, 0));
+                }
+            }
+            b"EFIT" => {
+                let at = |o: usize| s.data.get(o..o + 4).map(|b| <[u8; 4]>::try_from(b).unwrap());
+                if let (Some(last), Some(m), Some(d)) = (magic.effects.last_mut(), at(0), at(8)) {
+                    last.1 = f32::from_le_bytes(m);
+                    last.2 = u32::from_le_bytes(d);
+                }
+            }
+            _ => {}
+        }
+    }
+    magic
 }
 
 fn read_arma(plugin: &PluginFile, r: &Record) -> Arma {
@@ -626,6 +816,57 @@ mod tests {
     }
 
     #[test]
+    fn reads_an_armours_stats_keywords_and_enchantment() {
+        let data = temp_dir("arm_stats").join("Data");
+        std::fs::create_dir_all(&data).unwrap();
+        let f32b = |v: f32| v.to_le_bytes().to_vec();
+        let armo = |form: u32, edid: &str, kind: u32, rating: i32, keywords: &[u32], ench: Option<u32>| {
+            let mut subs = vec![
+                sub(b"EDID", &zstr(edid)),
+                sub(b"FULL", &zstr(edid)),
+                sub(b"BOD2", &[id(0b100), id(kind)].concat()),
+                sub(b"DATA", &[id(125), f32b(28.5)].concat()),
+                sub(b"DNAM", &rating.to_le_bytes()),
+                sub(b"KSIZ", &id(keywords.len() as u32)),
+                sub(b"KWDA", &keywords.iter().flat_map(|k| id(*k)).collect::<Vec<_>>()),
+            ];
+            if let Some(e) = ench {
+                subs.push(sub(b"EITM", &id(e)));
+            }
+            record(b"ARMO", form, &subs, false)
+        };
+        let effect = |mgef: u32, magnitude: f32, duration: u32| [sub(b"EFID", &id(mgef)), sub(b"EFIT", &[f32b(magnitude), id(0), id(duration)].concat())];
+        let [efid, efit] = effect(0x500, 15.0, 0);
+        let ench = record(b"ENCH", 0x400, &[sub(b"EDID", &zstr("EnchSneak")), efid, efit], false);
+        let modp = plugin(
+            0,
+            &[],
+            &[
+                group(b"KYWD", &[record(b"KYWD", 0x300, &[sub(b"EDID", &zstr("ArmorMaterialIron"))], false)]),
+                group(b"MGEF", &[record(b"MGEF", 0x500, &[sub(b"EDID", &zstr("FortifySneak")), sub(b"FULL", &zstr("Fortify Sneak"))], false)]),
+                group(b"ENCH", &[ench]),
+                group(b"ARMO", &[armo(0x200, "Plate", 1, 2500, &[0x300, 0x999], Some(0x400)), armo(0x201, "Robe", 2, 0, &[], None)]),
+            ],
+        );
+        write(&data, "Stats.esp", &modp);
+        let catalog = ArmourCatalog::open(&data, &["Stats.esp".to_string()]);
+        assert!(catalog.problems().is_empty(), "{:?}", catalog.problems());
+        let armours = catalog.armours_in("Stats.esp", None).unwrap();
+        let by = |n: &str| armours.iter().find(|a| a.editor_id == n).unwrap();
+        let plate = &by("Plate").stats;
+        assert_eq!(plate.kind, Some(ArmourKind::Heavy));
+        assert_eq!((plate.rating, plate.weight, plate.value), (25.0, 28.5, 125));
+        // A keyword with no record is still named, by its ID.
+        assert_eq!(plate.keywords, ["ArmorMaterialIron", "000999"]);
+        let ench = plate.enchantment.as_ref().unwrap();
+        assert_eq!(ench.name, "EnchSneak", "an enchantment with no name of its own is named by its editor ID");
+        assert_eq!(ench.effects, [EnchantEffect { name: "Fortify Sneak".into(), magnitude: 15.0, duration: 0 }]);
+        let robe = &by("Robe").stats;
+        assert_eq!(robe.kind, Some(ArmourKind::Clothing));
+        assert!(robe.keywords.is_empty() && robe.enchantment.is_none());
+    }
+
+    #[test]
     fn lists_the_armours_of_a_plugin_with_names_models_and_slots() {
         let (data, catalog) = install("arm_basic");
         assert!(catalog.problems().is_empty(), "{:?}", catalog.problems());
@@ -857,6 +1098,7 @@ mod tests {
             female: ModelSet::default(),
             male: ModelSet::default(),
             missing_armatures: 0,
+            stats: ArmourStats::default(),
         };
         assert_eq!(a.slot_names(), ["Body", "Hands", "slot 44"]);
     }

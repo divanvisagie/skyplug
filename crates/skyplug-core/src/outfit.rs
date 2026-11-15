@@ -29,6 +29,9 @@ const MAX_ITEMS: usize = 5000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WornItem {
     pub key: FormKey,
+    /// Held in the left hand (the save marks it `WornLeft`). Armour and a weapon in the right hand,
+    /// the main one, have it false.
+    pub left: bool,
 }
 
 /// The items the player wears in a save's bytes, in inventory order. Items made in game
@@ -184,7 +187,8 @@ fn worn(data: &[u8], names: &Names) -> Result<Outfit> {
     let mut out = Outfit::default();
     for item in items.iter().filter(|i| i.worn) {
         match names.form_id(item.reference).and_then(|f| names.key(f)) {
-            Some(key) if !out.worn.iter().any(|w| w.key == key) => out.worn.push(WornItem { key }),
+            // The same weapon can be held in both hands, so a key counts once for each.
+            Some(key) if !out.worn.iter().any(|w| w.key == key && w.left == item.left) => out.worn.push(WornItem { key, left: item.left }),
             Some(_) => {}
             None => out.skipped += 1,
         }
@@ -195,6 +199,8 @@ fn worn(data: &[u8], names: &Names) -> Result<Outfit> {
 struct Item {
     reference: u32,
     worn: bool,
+    /// Worn in the left hand.
+    left: bool,
 }
 
 /// A variable-size value: the low two bits of the first byte say how many bytes it takes.
@@ -272,7 +278,7 @@ fn inventory(b: &[u8], start: usize) -> Option<Vec<Item>> {
             return None;
         }
         p = next;
-        let mut worn = false;
+        let (mut worn, mut left) = (false, false);
         for _ in 0..lists {
             let (entries, next) = vsval(b, p)?;
             if entries > MAX_LISTS {
@@ -282,10 +288,11 @@ fn inventory(b: &[u8], start: usize) -> Option<Vec<Item>> {
             for _ in 0..entries {
                 let (kind, next) = extra(b, p)?;
                 worn |= kind == EXTRA_WORN || kind == EXTRA_WORN_LEFT;
+                left |= kind == EXTRA_WORN_LEFT;
                 p = next;
             }
         }
-        items.push(Item { reference: r, worn });
+        items.push(Item { reference: r, worn, left });
     }
     Some(items)
 }
@@ -341,6 +348,9 @@ mod tests {
         let worn: Vec<u32> = items.iter().filter(|i| i.worn).map(|i| i.reference & 0xFFFF).collect();
         assert_eq!(items.len(), 3);
         assert_eq!(worn, [0x0123, 0x0456]);
+        // Which hand: the ring is marked worn-left, the other is not.
+        let left: Vec<bool> = items.iter().filter(|i| i.worn).map(|i| i.left).collect();
+        assert_eq!(left, [false, true]);
     }
 
     #[test]
@@ -361,8 +371,8 @@ mod tests {
         assert_eq!(
             outfit.worn,
             [
-                WornItem { key: FormKey { plugin: "skyrim.esm".into(), id: 0x0123 } },
-                WornItem { key: FormKey { plugin: "skyrim.esm".into(), id: 0x0456 } },
+                WornItem { key: FormKey { plugin: "skyrim.esm".into(), id: 0x0123 }, left: false },
+                WornItem { key: FormKey { plugin: "skyrim.esm".into(), id: 0x0456 }, left: true },
             ]
         );
     }

@@ -187,6 +187,11 @@ impl Skeleton {
         Skeleton { bones: nif.nodes.iter().map(|(n, t)| (n.to_ascii_lowercase(), *t)).collect() }
     }
 
+    /// A skeleton from named transforms, for tests and tools that build one by hand.
+    pub fn from_bones(bones: impl IntoIterator<Item = (String, Transform)>) -> Self {
+        Skeleton { bones: bones.into_iter().map(|(n, t)| (n.to_ascii_lowercase(), t)).collect() }
+    }
+
     /// A bone's transform by name (any case).
     pub fn bone(&self, name: &str) -> Option<&Transform> {
         self.bones.get(&name.to_ascii_lowercase())

@@ -207,6 +207,21 @@ impl WeaponKind {
         }
     }
 
+    /// The skeleton node the game sheathes this kind of weapon on (`WeaponDagger` on the ankle,
+    /// `WeaponBack` for the big ones), or `None` for fists.
+    pub fn sheath_node(self) -> Option<&'static str> {
+        use WeaponKind::*;
+        Some(match self {
+            HandToHand => return None,
+            OneHandSword => "WeaponSword",
+            OneHandDagger => "WeaponDagger",
+            OneHandAxe => "WeaponAxe",
+            OneHandMace => "WeaponMace",
+            TwoHandSword | TwoHandAxe | Staff => "WeaponBack",
+            Bow | Crossbow => "WeaponBow",
+        })
+    }
+
     pub fn two_handed(self) -> bool {
         use WeaponKind::*;
         matches!(self, TwoHandSword | TwoHandAxe | Bow | Crossbow)

@@ -408,6 +408,26 @@ impl Model {
         report
     }
 
+    /// Put the model where the game attaches it to the skeleton's node `node` (any case), like a
+    /// weapon on its sheath node: every vertex moves by the node's transform. Returns `false`,
+    /// leaving the model as it is, if the skeleton has no such node. Meshes skinned to bones
+    /// are not moved by this; [`Self::pose`] places those.
+    pub fn attach(&mut self, skeleton: &Skeleton, node: &str) -> bool {
+        let Some(t) = skeleton.bone(node).copied() else { return false };
+        for m in &mut self.meshes {
+            if m.mesh.skin.is_some() {
+                continue;
+            }
+            for p in &mut m.mesh.positions {
+                *p = t.point(*p);
+            }
+            for n in &mut m.mesh.normals {
+                *n = t.rotate(*n);
+            }
+        }
+        true
+    }
+
     /// What a renderer of its own needs to draw each mesh: the mesh, its diffuse and normal maps, and
     /// whether it is the body underlay. In draw order of the file; posed meshes are as [`Self::pose`] left them.
     pub fn parts(&self) -> Vec<Part<'_>> {
@@ -716,6 +736,10 @@ mod tests {
     use crate::nif::Alpha;
 
     /// A triangle in the XZ plane facing +Y (front), wound counter-clockwise from there.
+    fn skeleton_with(name: &str, t: crate::nif::Transform) -> Skeleton {
+        Skeleton::from_bones([(name.to_string(), t)])
+    }
+
     fn tri(y: f32) -> Mesh {
         Mesh {
             name: "t".into(),
@@ -865,6 +889,25 @@ mod tests {
         cloth.shader_type = Some(0);
         let model = Model::load(&resolver, &Nif { meshes: vec![skin, cloth], ..Nif::default() }, 256);
         assert!(model.meshes[0].underlay && !model.meshes[1].underlay);
+    }
+
+    #[test]
+    fn a_model_attaches_to_a_skeleton_node_and_is_moved_by_it() {
+        use crate::nif::Transform;
+        let skeleton = Skeleton::from_nif(&Nif::default());
+        let mut model = Model::from_meshes(vec![(tri(0.0), None)]);
+        // No such node: left where it is.
+        assert!(!model.attach(&skeleton, "WeaponDagger"));
+        let before = model.meshes[0].mesh.positions.clone();
+        assert_eq!(model.meshes[0].mesh.positions, before);
+
+        // A node 10 up and turned a quarter about Z: points move by it, in any case of the name.
+        let node = Transform { t: [0.0, 0.0, 10.0], r: [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], s: 1.0 };
+        let skeleton = skeleton_with("WeaponDagger", node);
+        assert!(model.attach(&skeleton, "weapondagger"));
+        for (p, q) in model.meshes[0].mesh.positions.iter().zip(&before) {
+            assert_eq!(*p, node.point(*q));
+        }
     }
 
     #[test]

@@ -325,6 +325,12 @@ impl ArmourCatalog {
         &self.problems
     }
 
+    /// Whether the load order has a plugin of this name (any case), for stats that exist only
+    /// with it, like Survival Mode's warmth.
+    pub fn has_plugin(&self, name: &str) -> bool {
+        self.plugins.iter().any(|p| p.name.eq_ignore_ascii_case(name))
+    }
+
     /// The plugins that have armour records (adding or changing), with how many, in load order.
     pub fn plugins_with_armours(&self) -> Vec<(String, usize)> {
         self.plugins
@@ -851,6 +857,7 @@ mod tests {
         write(&data, "Stats.esp", &modp);
         let catalog = ArmourCatalog::open(&data, &["Stats.esp".to_string()]);
         assert!(catalog.problems().is_empty(), "{:?}", catalog.problems());
+        assert!(catalog.has_plugin("stats.ESP") && !catalog.has_plugin("Other.esp"));
         let armours = catalog.armours_in("Stats.esp", None).unwrap();
         let by = |n: &str| armours.iter().find(|a| a.editor_id == n).unwrap();
         let plate = &by("Plate").stats;

@@ -157,6 +157,100 @@ pub struct ArmourStats {
     pub enchantment: Option<Enchantment>,
 }
 
+/// What a weapon is: the animation type in its record (`DNAM`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WeaponKind {
+    HandToHand,
+    OneHandSword,
+    OneHandDagger,
+    OneHandAxe,
+    OneHandMace,
+    TwoHandSword,
+    TwoHandAxe,
+    Bow,
+    Staff,
+    Crossbow,
+}
+
+impl WeaponKind {
+    fn from_code(code: u8) -> Option<Self> {
+        use WeaponKind::*;
+        Some(match code {
+            0 => HandToHand,
+            1 => OneHandSword,
+            2 => OneHandDagger,
+            3 => OneHandAxe,
+            4 => OneHandMace,
+            5 => TwoHandSword,
+            6 => TwoHandAxe,
+            7 => Bow,
+            8 => Staff,
+            9 => Crossbow,
+            _ => return None,
+        })
+    }
+
+    /// As the game says it: "One-handed sword", "Two-handed axe", "Bow".
+    pub fn label(self) -> &'static str {
+        use WeaponKind::*;
+        match self {
+            HandToHand => "Hand to hand",
+            OneHandSword => "One-handed sword",
+            OneHandDagger => "One-handed dagger",
+            OneHandAxe => "One-handed axe",
+            OneHandMace => "One-handed mace",
+            TwoHandSword => "Two-handed sword",
+            TwoHandAxe => "Two-handed axe",
+            Bow => "Bow",
+            Staff => "Staff",
+            Crossbow => "Crossbow",
+        }
+    }
+
+    pub fn two_handed(self) -> bool {
+        use WeaponKind::*;
+        matches!(self, TwoHandSword | TwoHandAxe | Bow | Crossbow)
+    }
+}
+
+/// What a weapon record says about it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WeaponStats {
+    pub kind: Option<WeaponKind>,
+    /// Base damage.
+    pub damage: u32,
+    pub speed: f32,
+    pub reach: f32,
+    /// The flat damage a critical hit adds.
+    pub crit_damage: u32,
+    pub weight: f32,
+    pub value: u32,
+    pub keywords: Vec<String>,
+    pub enchantment: Option<Enchantment>,
+}
+
+/// A weapon record. The model is how it looks held, with no hand to hold it: not drawn like an
+/// armour, which is worn on a body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Weapon {
+    pub key: FormKey,
+    /// The plugin this entry was read from, and the one that first defines the weapon.
+    pub plugin: String,
+    pub defined_in: String,
+    pub editor_id: String,
+    pub name: Option<String>,
+    /// Its game path, like `meshes/weapons/iron/irondagger.nif`.
+    pub model: Option<String>,
+    pub stats: WeaponStats,
+}
+
+impl Weapon {
+    /// The name, or the editor ID if the name couldn't be read.
+    pub fn label(&self) -> &str {
+        self.name.as_deref().filter(|n| !n.is_empty()).unwrap_or(&self.editor_id)
+    }
+}
+
 /// An armour record and what it's worn as.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Armour {
@@ -434,6 +528,89 @@ impl ArmourCatalog {
             })
             .collect();
         Some(Enchantment { name, effects })
+    }
+
+    /// The weapon each of `keys` names, as the load order has it (the last plugin to change a
+    /// record wins), in the order of `keys`; a key no plugin has a weapon record for is left out.
+    pub fn weapons_for(&self, keys: &[FormKey], resolver: Option<&AssetResolver>) -> Vec<Weapon> {
+        let mut found: Vec<Option<Weapon>> = vec![None; keys.len()];
+        let mut tables = StringTables::new();
+        for file in self.plugins.iter().rev().filter(|p| p.has_group(b"WEAP")) {
+            if found.iter().all(Option::is_some) {
+                break;
+            }
+            let Ok(list) = file.records(b"WEAP") else { continue };
+            let strings = if file.is_localized() { resolver.and_then(|r| self.string_table(r, file)) } else { None };
+            for r in &list.records {
+                let (plugin, id) = file.resolve(r.form_id);
+                let key = FormKey { plugin, id };
+                let Some(at) = keys.iter().position(|k| *k == key).filter(|&at| found[at].is_none()) else { continue };
+                found[at] = Some(self.read_weapon(file, r, key, strings.as_ref(), resolver, &mut tables));
+            }
+        }
+        found.into_iter().flatten().collect()
+    }
+
+    fn read_weapon(
+        &self,
+        file: &PluginFile,
+        r: &Record,
+        key: FormKey,
+        strings: Option<&HashMap<u32, String>>,
+        resolver: Option<&AssetResolver>,
+        tables: &mut StringTables,
+    ) -> Weapon {
+        let mut name = None;
+        let mut model = None;
+        let mut stats = WeaponStats::default();
+        let mut enchantment = None;
+        let form_key = |f: u32| {
+            let (plugin, id) = file.resolve(f);
+            FormKey { plugin, id }
+        };
+        for s in r.subrecords() {
+            let u32_at = |o: usize| s.data.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+            let f32_at = |o: usize| s.data.get(o..o + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap()));
+            let u16_at = |o: usize| s.data.get(o..o + 2).map(|b| u16::from_le_bytes(b.try_into().unwrap()));
+            match &s.kind {
+                b"FULL" if file.is_localized() => name = s.u32().and_then(|i| strings?.get(&i).cloned()),
+                b"FULL" => name = Some(s.string()),
+                b"MODL" => model = Some(game_path(&s.string())),
+                b"DATA" => {
+                    stats.value = u32_at(0).unwrap_or(0);
+                    stats.weight = f32_at(4).unwrap_or(0.0);
+                    stats.damage = u16_at(8).map_or(0, u32::from);
+                }
+                b"DNAM" => {
+                    stats.kind = s.data.first().and_then(|&c| WeaponKind::from_code(c));
+                    stats.speed = f32_at(4).unwrap_or(0.0);
+                    stats.reach = f32_at(8).unwrap_or(0.0);
+                }
+                b"CRDT" => stats.crit_damage = u16_at(0).map_or(0, u32::from),
+                b"KWDA" => {
+                    for i in 0..s.data.len() / 4 {
+                        if let Some(word) = u32_at(i * 4) {
+                            let key = form_key(word);
+                            stats.keywords.push(self.keywords.get(&key).cloned().unwrap_or_else(|| format!("{:06X}", key.id)));
+                        }
+                    }
+                }
+                b"EITM" => enchantment = s.u32().map(form_key),
+                _ => {}
+            }
+        }
+        // A string ID left where text should be isn't a name.
+        let name = name.filter(|n| !n.chars().any(char::is_control));
+        stats.enchantment = enchantment.and_then(|key| self.enchantment(&key, resolver, tables));
+        Weapon {
+            defined_in: self.defined_in(&key),
+            plugin: file.name.clone(),
+            key,
+            editor_id: r.editor_id().unwrap_or_default(),
+            name,
+            model,
+            stats,
+        }
     }
 
     fn read_armour(
@@ -871,6 +1048,64 @@ mod tests {
         let robe = &by("Robe").stats;
         assert_eq!(robe.kind, Some(ArmourKind::Clothing));
         assert!(robe.keywords.is_empty() && robe.enchantment.is_none());
+    }
+
+    #[test]
+    fn reads_the_weapons_a_character_holds_and_the_last_plugin_to_change_one_wins() {
+        let data = temp_dir("weap_stats").join("Data");
+        std::fs::create_dir_all(&data).unwrap();
+        let f32b = |v: f32| v.to_le_bytes().to_vec();
+        let weap = |form: u32, edid: &str, name: &str, kind: u8, damage: u16, speed: f32, reach: f32, keywords: &[u32]| {
+            let mut dnam = vec![0u8; 100];
+            dnam[0] = kind;
+            dnam[4..8].copy_from_slice(&speed.to_le_bytes());
+            dnam[8..12].copy_from_slice(&reach.to_le_bytes());
+            let data = [id(10), f32b(2.0), damage.to_le_bytes().to_vec()].concat();
+            record(
+                b"WEAP",
+                form,
+                &[
+                    sub(b"EDID", &zstr(edid)),
+                    sub(b"FULL", &zstr(name)),
+                    sub(b"MODL", &zstr(&format!("Weapons\\Iron\\{edid}.nif"))),
+                    sub(b"DATA", &data),
+                    sub(b"DNAM", &dnam),
+                    sub(b"CRDT", &[2u8, 0, 0, 0, 0, 0, 0, 0].to_vec()),
+                    sub(b"KWDA", &keywords.iter().flat_map(|k| id(*k)).collect::<Vec<_>>()),
+                ],
+                false,
+            )
+        };
+        let base = plugin(
+            0,
+            &[],
+            &[
+                group(b"KYWD", &[record(b"KYWD", 0x300, &[sub(b"EDID", &zstr("WeapMaterialIron"))], false)]),
+                group(b"WEAP", &[weap(0x200, "IronDagger", "Iron Dagger", 2, 4, 1.3, 0.7, &[0x300]), weap(0x201, "IronGreatsword", "Iron Greatsword", 5, 15, 0.7, 1.3, &[])]),
+            ],
+        );
+        write(&data, "Base.esp", &base);
+        // A later plugin changes the dagger's damage.
+        let later = plugin(0, &["Base.esp"], &[group(b"WEAP", &[weap(0x0000_0200, "IronDagger", "Iron Dagger", 2, 9, 1.3, 0.7, &[])])]);
+        write(&data, "Later.esp", &later);
+        let catalog = ArmourCatalog::open(&data, &["Base.esp".to_string(), "Later.esp".to_string()]);
+        let key = |id| FormKey { plugin: "base.esp".into(), id };
+        // In the order asked for; an armour's key, or a torch's, has no weapon record and is left out.
+        let weapons = catalog.weapons_for(&[key(0x201), key(0x999), key(0x200)], None);
+        assert_eq!(weapons.len(), 2);
+        let sword = &weapons[0];
+        assert_eq!(sword.label(), "Iron Greatsword");
+        assert_eq!(sword.model.as_deref(), Some("meshes/weapons/iron/irongreatsword.nif"));
+        assert_eq!(sword.stats.kind, Some(WeaponKind::TwoHandSword));
+        assert!(sword.stats.kind.unwrap().two_handed());
+        assert_eq!((sword.stats.damage, sword.stats.speed, sword.stats.reach, sword.stats.crit_damage), (15, 0.7, 1.3, 2));
+        let dagger = &weapons[1];
+        assert_eq!(dagger.stats.kind, Some(WeaponKind::OneHandDagger));
+        assert!(!dagger.stats.kind.unwrap().two_handed());
+        assert_eq!(dagger.stats.damage, 9, "the later plugin's version wins");
+        assert_eq!(dagger.plugin, "Later.esp");
+        assert_eq!(dagger.defined_in, "Base.esp");
+        assert_eq!((dagger.stats.value, dagger.stats.weight), (10, 2.0));
     }
 
     #[test]

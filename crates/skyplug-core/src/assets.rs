@@ -68,6 +68,8 @@ type DirIndex = Arc<HashMap<String, String>>;
 /// Looks assets up across `Data` and a list of archives.
 pub struct AssetResolver {
     data_dir: PathBuf,
+    /// Folders searched for loose files before `data_dir` (and so before every archive), first listed first.
+    overlays: Vec<PathBuf>,
     archives: Vec<Archive>,
     warnings: Vec<String>,
     // Directory listings, keyed by real path, mapping lower-case name to real name.
@@ -90,7 +92,16 @@ impl AssetResolver {
                 Err(e) => warnings.push(format!("{:#}", e)),
             }
         }
-        AssetResolver { data_dir: data_dir.into(), archives: opened, warnings, dirs: Mutex::new(HashMap::new()) }
+        AssetResolver { data_dir: data_dir.into(), overlays: Vec::new(), archives: opened, warnings, dirs: Mutex::new(HashMap::new()) }
+    }
+
+    /// Put folders in front of `Data`, laid out like it (`meshes/…`, `textures/…`): a file found in one of them
+    /// beats the same path anywhere in the install, loose or in an archive; the first folder listed wins over the
+    /// later ones. For looking at files that aren't installed yet (a build's staging folder) in the context of
+    /// the install that will take them, without copying anything into it.
+    pub fn with_overlays(mut self, dirs: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.overlays = dirs.into_iter().collect();
+        self
     }
 
     /// A resolver for an install: the base game's archives, then the archives
@@ -188,7 +199,11 @@ impl AssetResolver {
     }
 
     fn find_loose(&self, path: &str) -> Option<PathBuf> {
-        let mut cur = self.data_dir.clone();
+        self.overlays.iter().chain(std::iter::once(&self.data_dir)).find_map(|root| self.find_loose_in(root, path))
+    }
+
+    fn find_loose_in(&self, root: &Path, path: &str) -> Option<PathBuf> {
+        let mut cur = root.to_path_buf();
         for comp in path.split('\\') {
             if comp.is_empty() || comp == "." || comp == ".." {
                 return None;
@@ -347,6 +362,31 @@ mod tests {
         assert_eq!(r.read_asset("textures/mod/onlyloose.dds").unwrap().unwrap(), b"loose2");
         assert!(r.resolve("textures/mod/nothing.dds").is_none());
         assert!(r.read_asset("textures/mod/nothing.dds").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_overlay_folder_beats_data_and_the_archives_and_the_first_overlay_wins() {
+        let (data, r) = setup("assets_overlay");
+        let root = data.parent().unwrap();
+        let (one, two) = (root.join("OverlayOne"), root.join("OverlayTwo"));
+        for (dir, body) in [(&one, &b"one"[..]), (&two, &b"two"[..])] {
+            std::fs::create_dir_all(dir.join("Textures/MOD")).unwrap();
+            std::fs::write(dir.join("Textures/MOD/BOTH.dds"), body).unwrap();
+        }
+        std::fs::write(two.join("Textures/MOD/OnlyTwo.dds"), b"only two").unwrap();
+        let r = r.with_overlays([one.clone(), two.clone(), root.join("NoSuchOverlay")]);
+
+        let both = r.resolve("textures/mod/both.dds").unwrap();
+        assert_eq!(both.winner, Source::Loose(one.join("Textures/MOD/BOTH.dds")));
+        assert_eq!(r.read(&both.winner).unwrap(), b"one");
+        // Only one loose file is looked up (the overlay's); what it hides, as for any loose file, is the archives' copies.
+        assert_eq!(both.shadowed.len(), 2, "{:?}", both.shadowed);
+        assert_eq!(r.read_asset("textures/mod/onlytwo.dds").unwrap().unwrap(), b"only two");
+        // Everything the overlays lack still comes from the install.
+        assert_eq!(r.read_asset("textures/mod/onlyloose.dds").unwrap().unwrap(), b"loose2");
+        assert_eq!(r.describe(&r.resolve("textures/mod/onlyfirst.dds").unwrap().winner), "a.bsa");
+        // Overlays can't be escaped either.
+        assert!(r.resolve("textures/../../secret.txt").is_none());
     }
 
     #[test]

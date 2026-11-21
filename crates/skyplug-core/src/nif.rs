@@ -128,6 +128,9 @@ pub struct Mesh {
     /// The shape's shine, when its shader has the specular flag. The game takes how much of it each
     /// point gets from the alpha of the normal map ([`slot::NORMAL`]).
     pub specular: Option<Specular>,
+    /// The normal map ([`slot::NORMAL`]) is in model space (shader flag `Model_Space_Normals`, 0x1000 of flags 1), as the
+    /// body's are: red, blue and green are the model's x, y and z, not a tangent frame's.
+    pub model_space_normals: bool,
     /// Drawn from both sides.
     pub double_sided: bool,
     /// The file marks the shape hidden; consumers usually skip these.
@@ -795,7 +798,7 @@ enum Block {
     /// Each bone's bind transform: from the skin's space to the bone's.
     SkinData(Vec<Transform>),
     SkinPartition(Geometry),
-    Lighting { shader_type: u32, flags2: u32, texture_set: i32, specular: Option<Specular> },
+    Lighting { shader_type: u32, flags1: u32, flags2: u32, texture_set: i32, specular: Option<Specular> },
     Effect { flags2: u32, texture: String },
     TextureSet(Vec<String>),
     Alpha(Alpha),
@@ -853,7 +856,7 @@ fn parse_block(ty: &str, data: &[u8], strings: &[String], le: bool) -> Result<Op
                 Ok((flags1 & 1 != 0 && shader_type == 0).then_some(Specular { color, strength, glossiness }))
             })()
             .unwrap_or(None);
-            Block::Lighting { shader_type, flags2, texture_set, specular }
+            Block::Lighting { shader_type, flags1, flags2, texture_set, specular }
         }
         "BSEffectShaderProperty" => {
             object_net(r, strings)?;
@@ -1127,8 +1130,9 @@ fn build_mesh<'a>(
         }
     }
     match get(s.shader) {
-        Some(Block::Lighting { shader_type, flags2, texture_set, specular }) => {
+        Some(Block::Lighting { shader_type, flags1, flags2, texture_set, specular }) => {
             m.shader_type = Some(*shader_type);
+            m.model_space_normals = flags1 & 0x1000 != 0;
             m.specular = *specular;
             m.double_sided = flags2 & 0x10 != 0;
             if let Some(Block::TextureSet(t)) = get(*texture_set) {

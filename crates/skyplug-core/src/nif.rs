@@ -146,6 +146,9 @@ pub struct Mesh {
     /// What the game needs to pose the shape on a skeleton; `None` for shapes with no skin data.
     /// [`Mesh::pose`] uses it. `positions` and `normals` are the stored pose.
     pub skin: Option<Skin>,
+    /// The transform that was baked into `positions` (the shape's own and its parents'), kept to take a change to the positions back
+    /// to the vertices as stored ([`Mesh::moved_in_file`]).
+    pub world: Option<Transform>,
 }
 
 /// A skinned shape's bones, bind transforms and per-vertex weights, with its vertices as stored
@@ -257,7 +260,80 @@ impl Mesh {
     }
 }
 
+type Mat3 = [[f32; 3]; 3];
+
+fn mat_inverse(m: &Mat3) -> Option<Mat3> {
+    let c = |a: usize, b: usize, c: usize, d: usize| m[a / 3][a % 3] * m[b / 3][b % 3] - m[c / 3][c % 3] * m[d / 3][d % 3];
+    let (c0, c1, c2) = (c(4, 8, 5, 7), c(5, 6, 3, 8), c(3, 7, 4, 6));
+    let det = m[0][0] * c0 + m[0][1] * c1 + m[0][2] * c2;
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let k = 1.0 / det;
+    Some([
+        [c0 * k, c(2, 7, 1, 8) * k, c(1, 5, 2, 4) * k],
+        [c1 * k, c(0, 8, 2, 6) * k, c(2, 3, 0, 5) * k],
+        [c2 * k, c(1, 6, 0, 7) * k, c(0, 4, 1, 3) * k],
+    ])
+}
+
+fn mat_apply(m: &Mat3, v: [f32; 3]) -> [f32; 3] {
+    [0, 1, 2].map(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2])
+}
+
 impl Mesh {
+    /// The vertices as the file stores them (before any transform) after the shape is changed so that each vertex is drawn `deltas[v]`
+    /// further than it is in `positions`. Drawing is what [`Mesh::pose`] makes of the stored vertices when the shape is skinned and a
+    /// `skeleton` is given (every vertex goes where the weighted bones take it), and otherwise the stored vertex moved by the shape's
+    /// transform. Either is a linear function of the stored vertex, so a change of `d` in what is drawn is the change `A⁻¹ d` in the
+    /// stored one, exactly, however far the vertex moved. A vertex whose map cannot be undone (a bone weight that squashes it flat)
+    /// is not moved.
+    pub fn moved_in_file(&self, skeleton: Option<&Skeleton>, deltas: &[[f32; 3]]) -> Result<Vec<[f32; 3]>> {
+        ensure!(deltas.len() == self.positions.len(), "{} changes for {} vertices", deltas.len(), self.positions.len());
+        let world = self.world.unwrap_or(Transform::IDENT);
+        let world_map: Mat3 = [0, 1, 2].map(|i| [0, 1, 2].map(|j| world.s * world.r[i][j]));
+        let stored: Vec<[f32; 3]> = match &self.skin {
+            Some(skin) => skin.local_positions.clone(),
+            None => self.positions.iter().map(|&p| world.inverse_point(p)).collect(),
+        };
+        let posed = match (&self.skin, skeleton) {
+            (Some(skin), Some(sk)) => Some((
+                skin,
+                skin.bones.iter().map(|b| sk.bone(&b.name).copied().unwrap_or(b.file_world).then(&b.bind)).collect::<Vec<Transform>>(),
+            )),
+            _ => None,
+        };
+        let mut out = Vec::with_capacity(stored.len());
+        for (v, (&p, &d)) in stored.iter().zip(deltas).enumerate() {
+            let map = match &posed {
+                Some((skin, to_world)) => {
+                    let (mut a, mut total) = ([[0f32; 3]; 3], 0f32);
+                    for k in 0..4 {
+                        let w = skin.weights[v][k];
+                        let Some(t) = to_world.get(skin.indices[v][k] as usize).filter(|_| w > 1e-6) else { continue };
+                        for i in 0..3 {
+                            for j in 0..3 {
+                                a[i][j] += w * t.s * t.r[i][j];
+                            }
+                        }
+                        total += w;
+                    }
+                    if total > 1e-6 { a.map(|row| row.map(|c| c / total)) } else { world_map }
+                }
+                None => world_map,
+            };
+            let moved = match mat_inverse(&map) {
+                Some(inv) => {
+                    let e = mat_apply(&inv, d);
+                    [p[0] + e[0], p[1] + e[1], p[2] + e[2]]
+                }
+                None => p,
+            };
+            out.push(moved);
+        }
+        Ok(out)
+    }
+
     /// The texture path in `slot` if there is one.
     pub fn texture(&self, slot: usize) -> Option<&str> {
         self.textures.get(slot).map(String::as_str).filter(|s| !s.is_empty())
@@ -389,6 +465,16 @@ impl Transform {
         let r = self.rotate(v);
         [self.t[0] + self.s * r[0], self.t[1] + self.s * r[1], self.t[2] + self.s * r[2]]
     }
+    /// The point that `point` takes to `p` (the rotation is a proper one, so its inverse is its transpose).
+    pub fn inverse_point(&self, p: [f32; 3]) -> [f32; 3] {
+        let q = [p[0] - self.t[0], p[1] - self.t[1], p[2] - self.t[2]];
+        let s = if self.s.abs() > 1e-12 { self.s } else { 1.0 };
+        let mut o = [0f32; 3];
+        for (j, v) in o.iter_mut().enumerate() {
+            *v = (self.r[0][j] * q[0] + self.r[1][j] * q[1] + self.r[2][j] * q[2]) / s;
+        }
+        o
+    }
     /// `self` is the parent's transform, `c` the child's: the child's, in the parent's parent's space.
     pub fn then(&self, c: &Transform) -> Transform {
         let mut r = [[0f32; 3]; 3];
@@ -450,6 +536,26 @@ struct Geometry {
     vertices: usize,
     /// An LE skin partition: it holds only the skin (weights and bones), the geometry is in the shape's data.
     skin_only: bool,
+    /// Where an SE vertex buffer with positions is in its block, for [`replace_positions`].
+    loc: Option<VertexLoc>,
+}
+
+/// An SE vertex buffer in a block: where it starts (from the block's start), the size of one vertex, how many there are and where
+/// the position (three floats) is within a vertex.
+#[derive(Debug, Clone, Copy)]
+struct VertexLoc {
+    offset: usize,
+    size: usize,
+    count: usize,
+    position: usize,
+}
+
+impl VertexLoc {
+    /// For a buffer taken at `offset` and described by `desc`; `None` if the vertices have no positions.
+    fn new(offset: usize, desc: u64, count: usize) -> Option<VertexLoc> {
+        let has_position = (desc >> 44) & 0x1 != 0;
+        has_position.then(|| VertexLoc { offset, size: ((desc & 0xF) * 4) as usize, count, position: (((desc >> 4) & 0xF) * 4) as usize })
+    }
 }
 
 /// Decode a packed SE vertex buffer described by `desc` (see `BSVertexDesc`).
@@ -527,10 +633,13 @@ struct Shape {
     own: Option<Geometry>,
     /// A `BSDynamicTriShape`'s positions, for when its vertex data has none.
     dynamic: Vec<[f32; 3]>,
+    /// Where the bounding sphere is in the block (a `BSTriShape`; unused for an `NiTriShape`).
+    bound_at: usize,
 }
 
 fn bs_tri_shape(r: &mut Reader, strings: &[String]) -> Result<Shape> {
     let av = av_object(r, strings)?;
+    let bound_at = r.p;
     r.skip(16)?; // bounding sphere
     let (skin, shader, alpha) = (r.i32()?, r.i32()?, r.i32()?);
     let desc = r.u64()?;
@@ -546,13 +655,15 @@ fn bs_tri_shape(r: &mut Reader, strings: &[String]) -> Result<Shape> {
             "data is {data_size} bytes, expected {nverts} vertices x {size} + {ntris} triangles x 6"
         );
         let mut g = Geometry::default();
+        let at = r.p;
         decode_vertices(r.take(nverts * size)?, desc, nverts, &mut g)?;
+        g.loc = VertexLoc::new(at, desc, nverts);
         for _ in 0..ntris {
             g.triangles.push([r.u16()?, r.u16()?, r.u16()?]);
         }
         own = Some(g);
     }
-    Ok(Shape { av, skin, shader, alpha, data: -1, own, dynamic: Vec::new() })
+    Ok(Shape { av, skin, shader, alpha, data: -1, own, dynamic: Vec::new(), bound_at })
 }
 
 /// `BSDynamicTriShape` (faces and hair): a `BSTriShape`, then its positions again as 16-byte
@@ -580,7 +691,7 @@ fn ni_tri_shape(r: &mut Reader, strings: &[String]) -> Result<Shape> {
     r.skip(materials * 8)?; // material names and extra data
     r.skip(4 + 1)?; // active material, needs-update flag
     let (shader, alpha) = (r.i32()?, r.i32()?);
-    Ok(Shape { av, skin, shader, alpha, data, own: None, dynamic: Vec::new() })
+    Ok(Shape { av, skin, shader, alpha, data, own: None, dynamic: Vec::new(), bound_at: usize::MAX })
 }
 
 fn ni_tri_shape_data(r: &mut Reader) -> Result<Geometry> {
@@ -669,10 +780,12 @@ fn skin_partition(r: &mut Reader) -> Result<Geometry> {
     let mut g = Geometry::default();
     if data_size > 0 {
         ensure!(data_size.checked_rem(vertex_size) == Some(0), "vertex buffer size doesn't divide by the vertex size");
+        let at = r.p;
         let raw = r.take(data_size)?;
         // Face and hair meshes (`BSDynamicTriShape`) keep positions in the shape itself, so their
         // partition's vertices have none (see `bs_dynamic_tri_shape`).
         decode_vertices(raw, desc, data_size / vertex_size, &mut g)?;
+        g.loc = VertexLoc::new(at, desc, data_size / vertex_size);
     }
     r.fits(parts, 20)?;
     for _ in 0..parts {
@@ -891,6 +1004,11 @@ fn looks_visible(ty: &str) -> bool {
 /// [`LegacyFormat`] (see [`anyhow::Error::downcast_ref`]) for Skyrim LE
 /// models; problems inside single blocks become [`Nif::warnings`].
 pub fn parse(bytes: &[u8]) -> Result<Nif> {
+    parse_blocks(bytes).map(|(nif, ..)| nif)
+}
+
+/// [`parse`], and also the blocks it was made of with where each starts in the file.
+fn parse_blocks(bytes: &[u8]) -> Result<(Nif, Vec<Option<Block>>, Vec<usize>)> {
     let nl = bytes.iter().take(128).position(|&c| c == b'\n').context("no Gamebryo header line")?;
     ensure!(bytes.starts_with(b"Gamebryo File Format") || bytes.starts_with(b"NetImmerse File Format"), "not a NIF file");
     let mut r = Reader::new(bytes);
@@ -932,9 +1050,11 @@ pub fn parse(bytes: &[u8]) -> Result<Nif> {
 
     let mut nif = Nif::default();
     let mut blocks: Vec<Option<Block>> = Vec::with_capacity(block_count);
+    let mut starts: Vec<usize> = Vec::with_capacity(block_count);
     let mut unsupported = HashSet::new();
     for i in 0..block_count {
         let ty = types.get(type_of[i]).map(String::as_str).context("block has an unknown type index")?;
+        starts.push(r.p);
         let data = r.take(sizes[i])?;
         match parse_block(ty, data, &strings, bs_version == BS_LE) {
             Ok(b) => {
@@ -952,7 +1072,66 @@ pub fn parse(bytes: &[u8]) -> Result<Nif> {
     nif.unsupported = unsupported.into_iter().collect();
     nif.unsupported.sort();
     assemble(&blocks, &mut nif);
-    Ok(nif)
+    Ok((nif, blocks, starts))
+}
+
+/// A copy of the NIF `bytes` in which the shapes named in `edits` have the positions given (in the shape's own space, as the file
+/// stores them: see [`Mesh::moved_in_file`]) and a bounding sphere to fit them; every other byte is as it was. An SE shape with its
+/// vertices in the shape or in its skin partition can be written; anything else (an LE shape, a face or hair `BSDynamicTriShape`)
+/// is an error and nothing is returned.
+pub fn replace_positions(bytes: &[u8], edits: &[(&str, &[[f32; 3]])]) -> Result<Vec<u8>> {
+    let (_, blocks, starts) = parse_blocks(bytes)?;
+    let mut out = bytes.to_vec();
+    for (name, positions) in edits {
+        let (index, shape) = blocks
+            .iter()
+            .enumerate()
+            .find_map(|(i, b)| match b {
+                Some(Block::Shape(s)) if s.av.name == *name => Some((i, s)),
+                _ => None,
+            })
+            .with_context(|| format!("the file has no shape named '{name}'"))?;
+        ensure!(shape.dynamic.is_empty(), "'{name}' keeps its positions apart from its vertices (hair or face): not supported");
+        // The buffer: in the shape, or (a skinned SE shape) in its skin partition.
+        let (block, loc) = match shape.own.as_ref().and_then(|g| g.loc) {
+            Some(loc) => (index, loc),
+            None => {
+                let partition = match usize::try_from(shape.skin).ok().and_then(|i| blocks.get(i)) {
+                    Some(Some(Block::SkinInstance { partition, .. })) => usize::try_from(*partition).ok(),
+                    _ => None,
+                };
+                let found = partition.and_then(|p| match blocks.get(p) {
+                    Some(Some(Block::SkinPartition(g))) => g.loc.map(|loc| (p, loc)),
+                    _ => None,
+                });
+                found.with_context(|| format!("'{name}' has no SE vertex buffer with positions to write"))?
+            }
+        };
+        ensure!(positions.len() == loc.count, "'{name}' has {} vertices, {} positions given", loc.count, positions.len());
+        for (v, p) in positions.iter().enumerate() {
+            let at = starts[block] + loc.offset + v * loc.size + loc.position;
+            for (k, c) in p.iter().enumerate() {
+                out[at + 4 * k..at + 4 * k + 4].copy_from_slice(&c.to_le_bytes());
+            }
+        }
+        // The bounding sphere (centre and radius, in the shape's space) follows the vertices.
+        if shape.bound_at != usize::MAX {
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for p in positions.iter() {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+            let radius = positions.iter().map(|p| ((p[0] - centre[0]).powi(2) + (p[1] - centre[1]).powi(2) + (p[2] - centre[2]).powi(2)).sqrt()).fold(0f32, f32::max);
+            let at = starts[index] + shape.bound_at;
+            for (k, c) in centre.iter().chain(std::iter::once(&radius)).enumerate() {
+                out[at + 4 * k..at + 4 * k + 4].copy_from_slice(&c.to_le_bytes());
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn assemble(blocks: &[Option<Block>], nif: &mut Nif) {
@@ -1121,6 +1300,7 @@ fn build_mesh<'a>(
     // their own origin and placed by the shape's translation (61 of 440 skinned shapes in a
     // typical install have one); armour shapes mostly have an identity transform.
     let world = parent.then(&s.av.xf);
+    m.world = Some(world);
     if !world.is_ident() {
         for p in &mut m.positions {
             *p = world.point(*p);
@@ -1455,6 +1635,177 @@ pub(crate) mod tests {
         // The root's offset applies to skinned shapes too, as the shape's own transform does.
         assert_eq!(m.positions[1], [101.0, 0.0, 0.0]);
         assert_eq!(m.triangles, [[0, 1, 2]]);
+    }
+
+    // ---- writing positions back
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        (0..3).all(|k| (a[k] - b[k]).abs() < 1e-4)
+    }
+
+    /// Not a test: writes each shape's own positions back into the real file named by NIF and checks it still reads the same.
+    #[test]
+    #[ignore]
+    fn a_real_file_written_back_unchanged_reads_the_same() {
+        let path = std::env::var("NIF").expect("NIF=<a .nif file>");
+        let bytes = std::fs::read(&path).unwrap();
+        let nif = parse(&bytes).unwrap();
+        let zero: Vec<Vec<[f32; 3]>> = nif.meshes.iter().map(|m| m.moved_in_file(None, &vec![[0.0; 3]; m.positions.len()]).unwrap()).collect();
+        let edits: Vec<(&str, &[[f32; 3]])> = nif.meshes.iter().zip(&zero).map(|(m, z)| (m.name.as_str(), z.as_slice())).collect();
+        let out = replace_positions(&bytes, &edits).unwrap();
+        assert_eq!(out.len(), bytes.len());
+        let again = parse(&out).unwrap();
+        assert_eq!(again.meshes.len(), nif.meshes.len());
+        let mut worst = 0f32;
+        for (a, b) in nif.meshes.iter().zip(&again.meshes) {
+            assert_eq!(a.triangles, b.triangles);
+            assert_eq!(a.uvs, b.uvs);
+            for (p, q) in a.positions.iter().zip(&b.positions) {
+                worst = worst.max((0..3).map(|k| (p[k] - q[k]).abs()).fold(0.0, f32::max));
+            }
+        }
+        let differing = (0..bytes.len()).filter(|&i| bytes[i] != out[i]).count();
+        println!("{path}: {} shapes, positions differ by at most {worst:e}, {differing} of {} bytes differ", nif.meshes.len(), bytes.len());
+        assert!(worst < 1e-3);
+    }
+
+    #[test]
+    fn a_three_by_three_inverse_undoes_the_map() {
+        let m: Mat3 = [[2.0, 0.5, 0.0], [-0.3, 1.5, 0.2], [0.1, 0.0, 0.8]];
+        let inv = mat_inverse(&m).unwrap();
+        let v = [1.0, -2.0, 3.0];
+        assert!(close(mat_apply(&inv, mat_apply(&m, v)), v));
+        assert!(mat_inverse(&[[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [0.0, 0.0, 1.0]]).is_none(), "a flat map has no inverse");
+    }
+
+    #[test]
+    fn replacing_positions_changes_those_bytes_and_the_bounding_sphere_and_nothing_else() {
+        let bytes = file(100, &["Root", "Tri"], &[("NiNode", ni_node(0, [10.0, 0.0, 0.0], &[1], None)), ("BSTriShape", bs_tri_shape_block(1, [0.0, 5.0, 0.0], -1, -1, -1, true))]);
+        let new = [[1.0, 2.0, 3.0], [4.0, 2.0, 3.0], [1.0, 6.0, 3.0]];
+        let out = replace_positions(&bytes, &[("Tri", &new)]).unwrap();
+        assert_eq!(out.len(), bytes.len());
+        let nif = parse(&out).unwrap();
+        // Stored positions are as given; the node and shape offsets still apply: (10, 5, 0).
+        assert_eq!(nif.meshes[0].positions[1], [14.0, 7.0, 3.0]);
+        // Only whole floats changed: 3 positions x 3 floats, plus the 4 of the bounding sphere.
+        let changed: Vec<usize> = (0..bytes.len()).filter(|&i| bytes[i] != out[i]).collect();
+        assert!(!changed.is_empty() && changed.len() <= 3 * 3 * 4 + 4 * 4, "{} bytes changed", changed.len());
+        // The UVs and normals are as they were.
+        assert_eq!(nif.meshes[0].uvs, parse(&bytes).unwrap().meshes[0].uvs);
+        assert_eq!(nif.meshes[0].normals, parse(&bytes).unwrap().meshes[0].normals);
+        // A wrong name or count is an error and not a half-written file.
+        assert!(replace_positions(&bytes, &[("Nope", &new)]).is_err());
+        assert!(replace_positions(&bytes, &[("Tri", &new[..2])]).is_err());
+    }
+
+    /// A skinned SE shape (no vertices of its own; the buffer is in its skin partition).
+    fn skinned_file() -> Vec<u8> {
+        let mut partition = vec![];
+        u32le(&mut partition, 1);
+        let verts = vertex_bytes(&TRI);
+        u32le(&mut partition, verts.len() as u32);
+        u32le(&mut partition, 24);
+        partition.extend_from_slice(&DESC.to_le_bytes());
+        partition.extend_from_slice(&verts);
+        for v in [3u16, 1, 0, 0, 0] {
+            partition.extend_from_slice(&v.to_le_bytes());
+        }
+        partition.extend_from_slice(&[0, 0]);
+        partition.push(1);
+        for i in [0u16, 1, 2] {
+            partition.extend_from_slice(&i.to_le_bytes());
+        }
+        partition.push(0);
+        partition.extend_from_slice(&[0, 0]);
+        partition.extend_from_slice(&0u64.to_le_bytes());
+        for i in [0u16, 1, 2] {
+            partition.extend_from_slice(&i.to_le_bytes());
+        }
+        let mut instance = vec![];
+        instance.extend_from_slice(&(-1i32).to_le_bytes());
+        instance.extend_from_slice(&2i32.to_le_bytes());
+        instance.extend_from_slice(&(-1i32).to_le_bytes());
+        u32le(&mut instance, 0);
+        u32le(&mut instance, 1);
+        instance.extend_from_slice(&0x101u16.to_le_bytes());
+        instance.extend_from_slice(&32u16.to_le_bytes());
+        file(
+            100,
+            &["Root", "Body"],
+            &[
+                ("NiNode", ni_node(0, [0.0; 3], &[3], None)),
+                ("BSDismemberSkinInstance", instance),
+                ("NiSkinPartition", partition),
+                ("BSTriShape", bs_tri_shape_block(1, [0.0, 0.0, 0.0], 1, -1, -1, false)),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_skinned_shapes_positions_are_written_into_its_skin_partition() {
+        let bytes = skinned_file();
+        let new = [[0.0, 0.0, 1.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]];
+        let out = replace_positions(&bytes, &[("Body", &new)]).unwrap();
+        let nif = parse(&out).unwrap();
+        assert!(nif.warnings.is_empty(), "{:?}", nif.warnings);
+        assert_eq!(nif.meshes[0].positions, new);
+        assert_eq!(nif.meshes[0].triangles, [[0, 1, 2]], "the triangles are untouched");
+    }
+
+    #[test]
+    fn a_change_in_what_is_drawn_becomes_the_change_in_the_file_through_the_shapes_transform() {
+        // A shape under a node moved by (10, 0, 0) with its own scale of 2: drawn = 10 + 2 * stored.
+        let strings = ["Root", "Tri"];
+        let mut shape = bs_tri_shape_block(1, [0.0, 0.0, 0.0], -1, -1, -1, true);
+        // The shape's scale is 2: it follows the translation and the 3x3 rotation in its NiAVObject.
+        let at = 4 + 4 + 4 + 4 + 12 + 36;
+        shape[at..at + 4].copy_from_slice(&2.0f32.to_le_bytes());
+        let bytes = file(100, &strings, &[("NiNode", ni_node(0, [10.0, 0.0, 0.0], &[1], None)), ("BSTriShape", shape)]);
+        let mesh = parse(&bytes).unwrap().meshes.remove(0);
+        assert_eq!(mesh.positions[1], [12.0, 0.0, 0.0], "drawn = 10 + 2 * (1, 0, 0)");
+        // Draw the whole shape 4 units further up and the second vertex 2 units further along x.
+        let deltas = [[0.0, 0.0, 4.0], [2.0, 0.0, 4.0], [0.0, 0.0, 4.0]];
+        let local = mesh.moved_in_file(None, &deltas).unwrap();
+        assert!(close(local[0], [0.0, 0.0, 2.0]), "4 drawn is 2 stored: {:?}", local[0]);
+        assert!(close(local[1], [2.0, 0.0, 2.0]), "{:?}", local[1]);
+        let out = replace_positions(&bytes, &[("Tri", &local)]).unwrap();
+        let after = parse(&out).unwrap().meshes.remove(0);
+        for v in 0..3 {
+            let want = [mesh.positions[v][0] + deltas[v][0], mesh.positions[v][1] + deltas[v][1], mesh.positions[v][2] + deltas[v][2]];
+            assert!(close(after.positions[v], want), "vertex {v}: {:?} wanted {want:?}", after.positions[v]);
+        }
+    }
+
+    #[test]
+    fn a_change_in_what_is_drawn_becomes_the_change_in_the_file_through_the_bones_it_is_posed_by() {
+        // Two bones, one turned a quarter about z and one moved, weights between them; vertices as stored.
+        let quarter = Transform { t: [1.0, 2.0, 3.0], r: [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], s: 1.0 };
+        let moved = Transform { t: [-4.0, 0.5, 0.0], r: Transform::IDENT.r, s: 1.5 };
+        let skeleton = Skeleton::from_bones([("A".to_string(), quarter), ("B".to_string(), moved)]);
+        let skin_with = |local: Vec<[f32; 3]>| Skin {
+            local_positions: local,
+            local_normals: vec![],
+            bones: ["A", "B"].iter().map(|n| SkinBone { name: n.to_string(), bind: Transform::IDENT, file_world: Transform::IDENT }).collect(),
+            weights: vec![[1.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0], [0.2, 0.8, 0.0, 0.0]],
+            indices: vec![[0, 1, 0, 0]; 3],
+        };
+        let stored = vec![[0.0, 0.0, 0.0], [1.0, 2.0, 0.5], [-3.0, 1.0, 2.0]];
+        let mesh_with = |local: Vec<[f32; 3]>| {
+            let mut m = Mesh { positions: local.clone(), skin: Some(skin_with(local)), skinned: true, world: Some(Transform::IDENT), ..Mesh::default() };
+            m = m.pose(&skeleton);
+            m
+        };
+        let before = mesh_with(stored.clone());
+        let deltas = [[0.0, 0.0, 2.0], [1.0, -1.0, 0.0], [0.5, 0.5, 0.5]];
+        let local = before.moved_in_file(Some(&skeleton), &deltas).unwrap();
+        // The stored vertices are not just moved by the delta: bones turned and scaled it...
+        assert!(!close(local[1], [stored[1][0] + deltas[1][0], stored[1][1] + deltas[1][1], stored[1][2] + deltas[1][2]]));
+        // ...but posing them again draws every vertex exactly `deltas` further.
+        let after = mesh_with(local);
+        for v in 0..3 {
+            let want = [before.positions[v][0] + deltas[v][0], before.positions[v][1] + deltas[v][1], before.positions[v][2] + deltas[v][2]];
+            assert!(close(after.positions[v], want), "vertex {v}: {:?} wanted {want:?}", after.positions[v]);
+        }
     }
 
     /// A skinned `BSDynamicTriShape` the way hair is stored: the partition's vertices have UVs and

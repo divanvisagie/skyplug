@@ -51,8 +51,29 @@ pub fn read_outfit_from_file(path: &Path) -> Result<Outfit> {
 
 /// What the player wears in a save held in memory.
 pub fn outfit(buf: &[u8]) -> Result<Outfit> {
+    let (forms, found) = find_change_form(buf, ACHR, PLAYER)?;
+    let (_flags, data) = found.context("the save has no change form for the player")?;
+    worn(&data, &forms.names())
+}
+
+/// The save's own numbering of plugins and records, which its change forms are written in.
+struct Forms {
+    plugins: Vec<String>,
+    lights: Vec<String>,
+    ids: Vec<u32>,
+}
+
+impl Forms {
+    fn names(&self) -> Names<'_> {
+        Names { plugins: &self.plugins, lights: &self.lights, ids: &self.ids }
+    }
+}
+
+/// The change form of one record in a save (its flags and its data, decompressed): the first of `kind` (the low six bits of the
+/// type byte: 1 is an `ACHR`, 9 an `NPC_`) whose record is `form_id`, as the full FormID in the save's load order.
+fn find_change_form(buf: &[u8], kind_want: u8, form_want: u32) -> Result<(Forms, Option<(u32, Vec<u8>)>)> {
     let opened = open(buf)?;
-    ensure!(opened.header.is_se, "only Special Edition saves can be read for an outfit");
+    ensure!(opened.header.is_se, "only Special Edition saves can be read");
     let body: &[u8] = &opened.body;
 
     // Plugins, then light plugins, then the file location table.
@@ -87,12 +108,12 @@ pub fn outfit(buf: &[u8]) -> Result<Outfit> {
         ids.push(id);
         p = next;
     }
-    let names = Names { plugins: &plugins, lights: &lights, ids: &ids };
+    let forms = Forms { plugins, lights, ids };
 
     let mut p = at(change_forms_offset)?;
     for _ in 0..change_form_count {
         let (r, next) = read_bytes(body, p, 3)?;
-        let (_flags, next) = read_u32(body, next)?;
+        let (flags, next) = read_u32(body, next)?;
         let (kind, next) = read_u8(body, next)?;
         let (_version, next) = read_u8(body, next)?;
         let (len1, len2, next) = match kind >> 6 {
@@ -114,17 +135,17 @@ pub fn outfit(buf: &[u8]) -> Result<Outfit> {
         };
         let (data, next) = read_bytes(body, next, len1)?;
         p = next;
-        if kind & 0x3F != ACHR || names.form_id(ref_id(r)) != Some(PLAYER) {
+        if kind & 0x3F != kind_want || forms.names().form_id(ref_id(r)) != Some(form_want) {
             continue;
         }
         let data = if len2 != 0 {
-            std::borrow::Cow::Owned(lz4_flex::block::decompress(data, len2).context("decompressing the player's change form")?)
+            lz4_flex::block::decompress(data, len2).context("decompressing a change form")?
         } else {
-            std::borrow::Cow::Borrowed(data)
+            data.to_vec()
         };
-        return worn(&data, &names);
+        return Ok((forms, Some((flags, data))));
     }
-    bail!("the save has no change form for the player")
+    Ok((forms, None))
 }
 
 fn names(body: &[u8], pos: &mut usize, count: usize) -> Result<Vec<String>> {
@@ -436,6 +457,21 @@ mod tests {
         }
         head.extend(body);
         head
+    }
+
+    /// Not a test: prints the player's base record from the save named by SAVE (for working out its layout).
+    #[test]
+    #[ignore]
+    fn dump_the_players_base_record() {
+        let path = std::env::var("SAVE").expect("SAVE=<save file>");
+        let buf = std::fs::read(path).unwrap();
+        for (kind, label) in [(9u8, "NPC_"), (1u8, "ACHR")] {
+            let (_, found) = find_change_form(&buf, kind, if kind == 9 { 0x7 } else { PLAYER }).unwrap();
+            match found {
+                Some((flags, data)) => println!("{label}: flags {flags:#010x} ({flags:032b}), {} bytes\n{}", data.len(), data.iter().take(160).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")),
+                None => println!("{label}: none"),
+            }
+        }
     }
 
     #[test]

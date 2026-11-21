@@ -325,6 +325,8 @@ pub struct ArmourCatalog {
     /// Plugins in load order.
     plugins: Vec<PluginFile>,
     armas: HashMap<FormKey, Arma>,
+    /// The winning (last in load order) record of each armour addon, for [`ArmourCatalog::model_patch`].
+    arma_records: HashMap<FormKey, ArmaRecord>,
     /// Keyword editor IDs, and the enchantments and magic effects, by record.
     keywords: HashMap<FormKey, String>,
     magic: HashMap<FormKey, Magic>,
@@ -339,6 +341,7 @@ impl ArmourCatalog {
     /// Read the `ARMA` records of `plugins`, given in load order.
     pub fn new(plugins: Vec<PluginFile>) -> Self {
         let mut armas = HashMap::new();
+        let mut arma_records = HashMap::new();
         let (mut keywords, mut magic) = (HashMap::new(), HashMap::new());
         let mut texture_sets = HashMap::new();
         let mut problems = Vec::new();
@@ -381,13 +384,15 @@ impl ArmourCatalog {
                     problems.extend(list.problems.iter().map(|p| format!("{}: {p}", plugin.name)));
                     for r in &list.records {
                         let (plugin_name, id) = plugin.resolve(r.form_id);
-                        armas.insert(FormKey { plugin: plugin_name, id }, read_arma(plugin, r));
+                        let key = FormKey { plugin: plugin_name, id };
+                        arma_records.insert(key.clone(), ArmaRecord { record: r.clone(), masters: plugin.masters.clone(), plugin: plugin.name.clone() });
+                        armas.insert(key, read_arma(plugin, r));
                     }
                 }
                 Err(e) => problems.push(format!("{}: {e:#}", plugin.name)),
             }
         }
-        ArmourCatalog { plugins, armas, keywords, magic, texture_sets, problems, language: "english".into() }
+        ArmourCatalog { plugins, armas, arma_records, keywords, magic, texture_sets, problems, language: "english".into() }
     }
 
     /// Open the plugins named in `load_order` (lowest first) from `data_dir`. Names with no
@@ -784,6 +789,131 @@ fn read_arma(plugin: &PluginFile, r: &Record) -> Arma {
     Arma { race, female, male, female_alts, male_alts, slots }
 }
 
+/// An armour addon's winning record and where it came from, for writing a patch that overrides it.
+struct ArmaRecord {
+    record: Record,
+    /// The masters of the plugin it came from, and that plugin's own name: what its FormIDs' top bytes index.
+    masters: Vec<String>,
+    plugin: String,
+}
+
+/// A plugin that points armour addons at other models, and what it did.
+#[derive(Debug, Clone, Default)]
+pub struct ModelPatch {
+    /// The plugin file, empty when no addon uses any of the models.
+    pub bytes: Vec<u8>,
+    /// How many armour addons it overrides.
+    pub addons: usize,
+    /// The models (game paths) no armour addon uses, so nothing was pointed anywhere for them.
+    pub unused: Vec<String>,
+}
+
+/// The subrecords of an `ARMA` that hold no FormID and that a patch copies as they are.
+const ARMA_PLAIN: [&[u8; 4]; 13] =
+    [b"EDID", b"BOD2", b"BODT", b"DNAM", b"MOD2", b"MOD3", b"MOD4", b"MOD5", b"MO2T", b"MO3T", b"MO4T", b"MO5T", b"OBND"];
+/// The ones that are one FormID (`MODL` is one per additional race), and the ones that list texture swaps with FormIDs in them.
+const ARMA_FORMS: [&[u8; 4]; 8] = [b"RNAM", b"MODL", b"SNDD", b"ONAM", b"NAM0", b"NAM1", b"NAM2", b"NAM3"];
+const ARMA_ALTS: [&[u8; 4]; 4] = [b"MO2S", b"MO3S", b"MO4S", b"MO5S"];
+/// The model subrecords of an addon: male, female, and the first-person pair.
+const ARMA_MODELS: [&[u8; 4]; 4] = [b"MOD2", b"MOD3", b"MOD4", b"MOD5"];
+
+/// A model path as an addon stores it, as a game path in lower case without the `meshes/` folder, to compare.
+fn model_key(path: &str) -> String {
+    let p = path.replace('\\', "/").to_ascii_lowercase();
+    p.strip_prefix("meshes/").unwrap_or(&p).to_string()
+}
+
+impl ArmourCatalog {
+    /// A light plugin that overrides every armour addon using one of the models in `swaps` (`(game path, game path to use instead)`),
+    /// each of its model subrecords that names the first replaced by the second, and nothing else about the addon changed. Each
+    /// override copies the addon's last version in the load order, so whatever other plugins changed is kept, and the plugin has to load
+    /// after all of them. An addon with a subrecord this does not know is an error rather than a guess, and nothing is returned.
+    pub fn model_patch(&self, swaps: &[(String, String)], description: &str) -> Result<ModelPatch> {
+        let wanted: Vec<(String, String)> = swaps.iter().map(|(from, to)| (model_key(from), model_key(to).replace('/', "\\"))).collect();
+        let swap = |model: &str| wanted.iter().find(|(from, _)| *from == model_key(model)).map(|(_, to)| to.clone());
+        let mut picked: Vec<(&FormKey, &ArmaRecord)> = self
+            .arma_records
+            .iter()
+            .filter(|(_, a)| a.record.subrecords().any(|s| ARMA_MODELS.iter().any(|k| s.is(k)) && swap(&s.string()).is_some()))
+            .collect();
+        let position = |plugin: &str| self.plugins.iter().position(|p| p.name.eq_ignore_ascii_case(plugin)).unwrap_or(usize::MAX);
+        picked.sort_by_key(|(k, _)| (position(&k.plugin), k.id));
+        let mut unused: Vec<String> = Vec::new();
+        for (from, _) in swaps {
+            let key = model_key(from);
+            if !picked.iter().any(|(_, a)| a.record.subrecords().any(|s| ARMA_MODELS.iter().any(|k| s.is(k)) && model_key(&s.string()) == key)) {
+                unused.push(from.clone());
+            }
+        }
+        let mut needed: std::collections::BTreeSet<(usize, String)> = std::collections::BTreeSet::new();
+        for (_, a) in &picked {
+            for m in a.masters.iter().chain(std::iter::once(&a.plugin)) {
+                needed.insert((position(m), m.clone()));
+            }
+        }
+        let masters: Vec<String> = needed.into_iter().map(|(_, m)| m).collect();
+        anyhow::ensure!(masters.len() < 0xFE, "the patch would need {} masters", masters.len());
+        let index_of = |name: &str| masters.iter().position(|m| m.eq_ignore_ascii_case(name));
+        let mut records = Vec::new();
+        for (key, a) in &picked {
+            records.push(patched_addon(a, &index_of, &swap).with_context(|| format!("the armour addon {}:{:06X}", key.plugin, key.id))?);
+        }
+        let bytes = crate::hair::build_plugin(&masters, b"ARMA", description, &records);
+        Ok(ModelPatch { bytes, addons: records.len(), unused })
+    }
+}
+
+/// An addon record with its model paths swapped, uncompressed and its FormIDs numbered by the patch's masters.
+fn patched_addon(src: &ArmaRecord, index_of: &dyn Fn(&str) -> Option<usize>, swap: &dyn Fn(&str) -> Option<String>) -> Result<Vec<u8>> {
+    let remap = |form: u32| -> Result<u32> {
+        let i = (form >> 24) as usize;
+        let owner = src.masters.get(i).unwrap_or(&src.plugin);
+        let n = index_of(owner).with_context(|| format!("{owner} isn't among the patch's masters"))?;
+        Ok(((n as u32) << 24) | (form & 0x00FF_FFFF))
+    };
+    let mut body = Vec::with_capacity(src.record.data().len());
+    for s in src.record.subrecords() {
+        let mut data = s.data.to_vec();
+        if ARMA_MODELS.iter().any(|k| s.is(k)) {
+            if let Some(to) = swap(&s.string()) {
+                data = to.into_bytes();
+                data.push(0);
+            }
+        } else if ARMA_FORMS.iter().any(|k| s.is(k)) {
+            let chunk = data.get_mut(..4).context("a FormID subrecord shorter than a FormID")?;
+            let form = u32::from_le_bytes((&*chunk).try_into().unwrap());
+            chunk.copy_from_slice(&remap(form)?.to_le_bytes());
+        } else if ARMA_ALTS.iter().any(|k| s.is(k)) {
+            // A count, then for each: a length-prefixed shape name, the texture set's FormID and the 3D index.
+            let u32_at = |d: &[u8], o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+            let count = u32_at(&data, 0).context("a texture swap list with no count")?;
+            let mut q = 4;
+            for _ in 0..count {
+                let len = u32_at(&data, q).context("a texture swap cut short")? as usize;
+                let at = q + 4 + len;
+                let form = u32_at(&data, at).context("a texture swap cut short")?;
+                data[at..at + 4].copy_from_slice(&remap(form)?.to_le_bytes());
+                q = at + 8;
+            }
+        } else if !ARMA_PLAIN.iter().any(|k| s.is(k)) {
+            anyhow::bail!("it has a {} subrecord this does not know how to copy", String::from_utf8_lossy(&s.kind));
+        }
+        anyhow::ensure!(data.len() <= u16::MAX as usize, "a subrecord is too large to copy");
+        body.extend_from_slice(&s.kind);
+        body.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        body.extend_from_slice(&data);
+    }
+    let mut out = b"ARMA".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(src.record.flags & !crate::hair::COMPRESSED).to_le_bytes());
+    out.extend_from_slice(&remap(src.record.form_id)?.to_le_bytes());
+    out.extend_from_slice(&[0u8; 4]); // version control
+    out.extend_from_slice(&crate::hair::FORM_VERSION.to_le_bytes());
+    out.extend_from_slice(&[0u8; 2]);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
 /// An alternate-textures subrecord: a count, then for each a length-prefixed shape name, the
 /// texture set's FormID and the shape's 3D index (not used: shapes are matched by name).
 fn read_alt_refs(plugin: &PluginFile, data: &[u8]) -> Vec<AltRef> {
@@ -1011,6 +1141,76 @@ mod tests {
         let order = ["Skyrim.esm", "Mod.esp"].map(String::from);
         let catalog = ArmourCatalog::open(&data, &order);
         (data, catalog)
+    }
+
+    /// Not a test: DATA=<Data dir> PLUGINS=<Plugins.txt>. Swaps every model any armour addon of the load order uses and checks the
+    /// patch can be made (no addon has a subrecord it does not know how to copy) and that it reads back.
+    #[test]
+    #[ignore]
+    fn a_patch_can_be_made_for_every_armour_addon_of_a_real_load_order() {
+        let data = std::path::PathBuf::from(std::env::var("DATA").expect("DATA=<Data dir>"));
+        let plugins = std::path::PathBuf::from(std::env::var("PLUGINS").expect("PLUGINS=<Plugins.txt>"));
+        let mut order: Vec<String> = crate::plugins::parse_plugins_txt(&plugins).unwrap().into_iter().filter(|e| e.active).map(|e| e.name).collect();
+        order.retain(|n| !n.eq_ignore_ascii_case("Arcanaeum Edits.esp"));
+        let catalog = ArmourCatalog::open(&data, &order);
+        let mut swaps: Vec<(String, String)> = Vec::new();
+        for a in catalog.arma_records.values() {
+            for s in a.record.subrecords() {
+                if ARMA_MODELS.iter().any(|k| s.is(k)) {
+                    let m = s.string();
+                    swaps.push((format!("meshes/{}", model_key(&m)), format!("meshes/arcanaeum/{}", model_key(&m))));
+                }
+            }
+        }
+        swaps.sort();
+        swaps.dedup();
+        let patch = catalog.model_patch(&swaps, "stress").unwrap();
+        println!("{} addons, {} models swapped, patch of {} bytes, {} masters needed; unused {}", catalog.arma_records.len(), swaps.len(), patch.bytes.len(), {
+            let tmp = std::env::temp_dir().join("arcanaeum_stress.esp");
+            std::fs::write(&tmp, &patch.bytes).unwrap();
+            PluginFile::open(&tmp).unwrap().masters.len()
+        }, patch.unused.len());
+        assert_eq!(patch.addons, catalog.arma_records.len().min(patch.addons));
+        assert!(patch.addons > 100);
+    }
+
+    #[test]
+    fn a_model_patch_points_the_addons_that_use_a_model_at_another_one_and_loads_after_what_it_copies() {
+        let (data, catalog) = install("model_patch");
+        // Skyrim.esm's iron cuirass addon is overridden by Mod.esp with UNP_Cuirass_1; Mod.esp also adds NewAA with New_1.
+        let swaps = [
+            ("meshes/armor/iron/f/unp_cuirass_1.nif".to_string(), "meshes/arcanaeum/armor/iron/f/unp_cuirass_1.nif".to_string()),
+            ("meshes/Mod/New_1.nif".to_string(), "meshes/arcanaeum/mod/new_1.nif".to_string()),
+            ("meshes/never/used_1.nif".to_string(), "meshes/arcanaeum/never/used_1.nif".to_string()),
+        ];
+        let patch = catalog.model_patch(&swaps, "Test patch.").unwrap();
+        assert_eq!(patch.addons, 2);
+        assert_eq!(patch.unused, ["meshes/never/used_1.nif"], "a model no addon uses is said");
+        write(&data, "Arcanaeum Edits.esp", &patch.bytes);
+        // Read back: its masters are the plugins the copies came from, in load order, and the models are swapped.
+        let file = PluginFile::open(data.join("Arcanaeum Edits.esp")).unwrap();
+        assert_eq!(file.masters, ["Skyrim.esm", "Mod.esp"]);
+        assert!(file.is_light());
+        let list = file.records(b"ARMA").unwrap();
+        assert_eq!(list.records.len(), 2);
+        let by_edid: std::collections::HashMap<String, &Record> = list.records.iter().map(|r| (r.editor_id().unwrap(), r)).collect();
+        let female = |r: &Record| r.subrecords().find(|s| s.is(b"MOD3")).map(|s| s.string());
+        assert_eq!(female(by_edid["IronAA"]).as_deref(), Some("arcanaeum\\armor\\iron\\f\\unp_cuirass_1.nif"));
+        assert_eq!(female(by_edid["NewAA"]).as_deref(), Some("arcanaeum\\mod\\new_1.nif"));
+        // The male model of IronAA was not named in the swaps and is as Mod.esp had it; the race is renumbered by the patch's masters.
+        assert_eq!(by_edid["IronAA"].subrecords().find(|s| s.is(b"MOD2")).map(|s| s.string()).as_deref(), Some("Armor\\Iron\\M\\Cuirass_1.nif"));
+        assert_eq!(by_edid["IronAA"].subrecords().find(|s| s.is(b"RNAM")).and_then(|s| s.u32()), Some(0x19));
+        // Overrides keep the FormIDs of what they override: IronAA is Skyrim.esm's 0x100 (index 0), NewAA is Mod.esp's 0x800 (index 1).
+        assert_eq!(by_edid["IronAA"].form_id, 0x0000_0100);
+        assert_eq!(by_edid["NewAA"].form_id, 0x0100_0800);
+        // Read as an armour catalog, with the patch last, the addons now point at the new models.
+        let after = ArmourCatalog::open(&data, &["Skyrim.esm", "Mod.esp", "Arcanaeum Edits.esp"].map(String::from));
+        let mod_armour = after.armours_in("Mod.esp", None).unwrap();
+        let new_models: Vec<&str> = mod_armour.iter().flat_map(|a| a.female.models.iter().map(String::as_str)).collect();
+        assert!(new_models.contains(&"meshes/arcanaeum/mod/new_1.nif"), "{new_models:?}");
+        // No model used: no plugin at all.
+        let none = catalog.model_patch(&[("meshes/nothing_1.nif".to_string(), "meshes/x_1.nif".to_string())], "x").unwrap();
+        assert!(none.bytes.is_empty() && none.addons == 0);
     }
 
     #[test]

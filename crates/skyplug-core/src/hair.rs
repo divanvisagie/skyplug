@@ -25,9 +25,9 @@ const MALE: u8 = 2;
 const FEMALE: u8 = 4;
 const EXTRA_PART: u8 = 8;
 /// A record's body is zlib-compressed, which the patch never is.
-const COMPRESSED: u32 = 0x0004_0000;
+pub(crate) const COMPRESSED: u32 = 0x0004_0000;
 /// The form version of Skyrim Special Edition's records.
-const FORM_VERSION: u16 = 44;
+pub(crate) const FORM_VERSION: u16 = 44;
 
 /// What kind of head part a record is (`PNAM`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -239,7 +239,7 @@ impl HairCatalog {
         for (_, src) in &picked {
             records.push(patched_record(src, &index_of)?);
         }
-        Ok(build_plugin(&masters, &records))
+        Ok(build_plugin(&masters, b"HDPT", "Hides the hairs left unticked in Arcanaeum's hair picker.", &records))
     }
 
     /// Write the patch to `path` (see [`Self::patch_bytes`]); with nothing to hide, any patch there is removed.
@@ -360,8 +360,8 @@ fn patched_record(src: &Source, index_of: &dyn Fn(&str) -> Option<usize>) -> Res
     Ok(out)
 }
 
-/// A light plugin with these masters and `HDPT` records; empty if there are no records.
-fn build_plugin(masters: &[String], records: &[Vec<u8>]) -> Vec<u8> {
+/// A light plugin with these masters and records of the group `label`; empty if there are no records.
+pub(crate) fn build_plugin(masters: &[String], label: &[u8; 4], description: &str, records: &[Vec<u8>]) -> Vec<u8> {
     if records.is_empty() {
         return Vec::new();
     }
@@ -376,7 +376,9 @@ fn build_plugin(masters: &[String], records: &[Vec<u8>]) -> Vec<u8> {
     hedr.extend_from_slice(&0x800u32.to_le_bytes()); // next object ID: nothing new is defined
     let mut body = sub(b"HEDR", &hedr);
     body.extend(sub(b"CNAM", b"Arcanaeum\0"));
-    body.extend(sub(b"SNAM", b"Hides the hairs left unticked in Arcanaeum's hair picker.\0"));
+    let mut text = description.as_bytes().to_vec();
+    text.push(0);
+    body.extend(sub(b"SNAM", &text));
     for m in masters {
         let mut name = m.as_bytes().to_vec();
         name.push(0);
@@ -394,7 +396,7 @@ fn build_plugin(masters: &[String], records: &[Vec<u8>]) -> Vec<u8> {
     let group: Vec<u8> = records.concat();
     out.extend_from_slice(b"GRUP");
     out.extend_from_slice(&((group.len() + 24) as u32).to_le_bytes());
-    out.extend_from_slice(b"HDPT");
+    out.extend_from_slice(label);
     out.extend_from_slice(&[0u8; 12]);
     out.extend(group);
     out
